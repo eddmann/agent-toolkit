@@ -18,5 +18,10 @@
     "repo": "vercel-labs/agent-skills",
     "path": "skills/web-design-guidelines",
     "ref": "9aec8ee6aaf702e49312a071e672f1c1b7b7e948"
+  },
+  "composition-patterns": {
+    "repo": "vercel-labs/agent-skills",
+    "path": "skills/composition-patterns",
+    "ref": "9aec8ee6aaf702e49312a071e672f1c1b7b7e948"
   }
 }

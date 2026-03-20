@@ -16,6 +16,7 @@ Current third-party skills:
 
 | Skill | Source | Description |
 |-------|--------|-------------|
+| **composition-patterns** | [vercel-labs/agent-skills](https://github.com/vercel-labs/agent-skills) | React composition patterns — compound components, scalable APIs |
 | **frontend-design** | [anthropics/skills](https://github.com/anthropics/skills) | Production-grade frontend interfaces with high design quality |
 | **react-best-practices** | [vercel-labs/agent-skills](https://github.com/vercel-labs/agent-skills) | React and Next.js performance optimization guidelines |
 | **remotion** | [remotion-dev/skills](https://github.com/remotion-dev/skills) | Best practices for Remotion video creation in React |
