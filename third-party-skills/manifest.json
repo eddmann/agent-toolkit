@@ -1,0 +1,22 @@
+{
+  "frontend-design": {
+    "repo": "anthropics/skills",
+    "path": "skills/frontend-design",
+    "ref": "b0cbd3df1533b396d281a6886d5132f623393a9c"
+  },
+  "remotion": {
+    "repo": "remotion-dev/skills",
+    "path": "skills/remotion",
+    "ref": "d5d395582c6227249cec74f53ab79aca77a4ff16"
+  },
+  "react-best-practices": {
+    "repo": "vercel-labs/agent-skills",
+    "path": "skills/react-best-practices",
+    "ref": "9aec8ee6aaf702e49312a071e672f1c1b7b7e948"
+  },
+  "web-design-guidelines": {
+    "repo": "vercel-labs/agent-skills",
+    "path": "skills/web-design-guidelines",
+    "ref": "9aec8ee6aaf702e49312a071e672f1c1b7b7e948"
+  }
+}
