@@ -1,0 +1,21 @@
+{
+  "name": "pi-voice",
+  "version": "1.0.0",
+  "description": "Hold-to-talk voice input for Pi — local Whisper (offline) or OpenAI Transcribe (cloud)",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./extensions/voice.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  },
+  "optionalDependencies": {
+    "sherpa-onnx-node": "^1.12.29"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
