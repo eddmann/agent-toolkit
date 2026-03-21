@@ -1,0 +1,656 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""
+project — manage isolated project clones for agent workloads.
+
+All output is JSON.
+
+Usage:
+    project create <project> [--name NAME] [--desc "..."]
+    project list [<project>] [--status active|review|all]
+    project switch <project> <clone>
+    project sync <project> <clone>
+    project diff <project> <clone>
+    project accept <project> <clone>
+    project discard <project> <clone>
+    project cleanup [--stale-days N]
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+PROJECTS_HOME = Path(
+    os.environ.get("PROJECTS_HOME", Path.home() / "Projects")
+).expanduser()
+
+CLONE_DIR = Path(
+    os.environ.get("PROJECTS_CLONE_DIR", Path.home() / ".projects")
+).expanduser()
+
+MANIFEST_FILE = CLONE_DIR / "manifest.json"
+LOCK_FILE = CLONE_DIR / ".manifest.lock"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _error(msg: str) -> None:
+    """Print a JSON error to stderr and exit."""
+    print(json.dumps({"error": msg}), file=sys.stderr)
+    sys.exit(1)
+
+
+def _json_out(obj: dict | list) -> None:
+    """Print JSON to stdout."""
+    print(json.dumps(obj, indent=2))
+
+
+def _run(
+    cmd: list[str],
+    *,
+    cwd: str | Path | None = None,
+    capture: bool = True,
+    check: bool = True,
+) -> subprocess.CompletedProcess:
+    """Run a subprocess, capturing output by default."""
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=capture,
+            text=True,
+            check=check,
+        )
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()
+        _error(f"command failed: {' '.join(cmd)}\n{stderr}")
+
+
+def _slugify(text: str, max_words: int = 5) -> str:
+    """Turn a description into a branch-safe slug."""
+    text = text.lower().strip()
+    text = re.sub(r"[^a-z0-9\s-]", "", text)
+    words = text.split()[:max_words]
+    return "-".join(words) if words else ""
+
+
+def _short_hash(text: str) -> str:
+    """Return a 4-char hex hash of text."""
+    return hashlib.sha256(text.encode()).hexdigest()[:4]
+
+
+def _clone_name(args) -> str:
+    """Derive clone name from args."""
+    if args.name:
+        return _slugify(args.name, max_words=8) or args.name
+    if args.desc:
+        slug = _slugify(args.desc)
+        h = _short_hash(f"{args.desc}{datetime.now().isoformat()}")
+        return f"{slug}-{h}" if slug else f"work-{h}"
+    h = _short_hash(datetime.now().isoformat())
+    return f"work-{h}"
+
+
+# ---------------------------------------------------------------------------
+# Manifest management
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _manifest_lock():
+    """Acquire exclusive lock on the manifest."""
+    CLONE_DIR.mkdir(parents=True, exist_ok=True)
+    fd = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+
+def _load_manifest() -> dict:
+    """Load manifest, returning empty structure if missing."""
+    if not MANIFEST_FILE.exists():
+        return {"projects": {}}
+    try:
+        return json.loads(MANIFEST_FILE.read_text())
+    except (json.JSONDecodeError, ValueError) as e:
+        _error(f"corrupt manifest at {MANIFEST_FILE} — {e}")
+
+
+def _save_manifest(data: dict) -> None:
+    """Write manifest atomically."""
+    CLONE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = MANIFEST_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.replace(MANIFEST_FILE)
+
+
+# ---------------------------------------------------------------------------
+# Source resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_source(project: str) -> Path:
+    """Find and validate the source repo."""
+    source = PROJECTS_HOME / project
+    if not source.is_dir():
+        _error(f"project not found: {source}")
+    if not (source / ".git").exists():
+        _error(f"not a git repo: {source}")
+    return source
+
+
+DEFAULT_BRANCH = "main"
+
+
+def _get_clone(manifest: dict, project: str, clone: str) -> tuple[dict, dict]:
+    """Look up a clone in the manifest. Returns (project_entry, clone_entry)."""
+    proj = manifest.get("projects", {}).get(project)
+    if not proj:
+        _error(f"project '{project}' not in manifest")
+    entry = proj.get("clones", {}).get(clone)
+    if not entry:
+        _error(f"clone '{clone}' not found for project '{project}'")
+    return proj, entry
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_list(args) -> None:
+    """List projects in PROJECTS_HOME with their active clones."""
+    if not PROJECTS_HOME.is_dir():
+        _error(f"projects directory not found: {PROJECTS_HOME}")
+
+    query = (args.query or "").lower()
+    manifest = _load_manifest()
+    results = []
+
+    for entry in sorted(PROJECTS_HOME.iterdir()):
+        if not entry.is_dir() or not (entry / ".git").exists():
+            continue
+        name = entry.name
+        if query and query not in name.lower():
+            continue
+
+        # Gather git metadata
+        branch = _run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            cwd=entry, check=False,
+        ).stdout.strip()
+
+        last_commit = _run(
+            ["git", "log", "-1", "--format=%ci"],
+            cwd=entry, check=False,
+        ).stdout.strip()
+
+        remote = _run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=entry, check=False,
+        ).stdout.strip()
+
+        # Gather clones from manifest
+        proj_manifest = manifest.get("projects", {}).get(name, {})
+        clones = []
+        for clone_name, clone in proj_manifest.get("clones", {}).items():
+            if args.status != "all" and clone.get("status") != args.status:
+                continue
+            clones.append({
+                "name": clone_name,
+                "path": clone["path"],
+                "branch": clone.get("branch", ""),
+                "description": clone.get("description", ""),
+                "status": clone.get("status", "unknown"),
+                "created": clone.get("created", ""),
+                "exists_on_disk": Path(clone["path"]).exists(),
+            })
+
+        results.append({
+            "name": name,
+            "path": str(entry),
+            "branch": branch,
+            "last_commit": last_commit,
+            "remote": remote or None,
+            "clones": clones,
+        })
+
+        if args.limit and len(results) >= args.limit:
+            break
+
+    _json_out(results)
+
+
+def cmd_create(args) -> None:
+    """Create a new isolated clone of a project."""
+    source = _resolve_source(args.project)
+    name = _clone_name(args)
+
+    clone_path = CLONE_DIR / args.project / name
+
+    with _manifest_lock():
+        manifest = _load_manifest()
+        projects = manifest.setdefault("projects", {})
+        proj = projects.setdefault(args.project, {
+            "source": str(source),
+            "clones": {},
+        })
+
+        if name in proj.get("clones", {}):
+            _error(f"clone '{name}' already exists for project '{args.project}'")
+
+        if clone_path.exists():
+            _error(f"directory already exists: {clone_path}")
+
+        # Create parent directory
+        clone_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Copy with APFS copy-on-write where available
+        cp_cmd = ["cp", "-R"]
+        if platform.system() == "Darwin":
+            cp_cmd.insert(1, "-c")
+
+        _run([*cp_cmd, str(source), str(clone_path)])
+
+        # Create a new branch in the clone
+        _run(["git", "checkout", "-b", name], cwd=clone_path)
+
+        # Update manifest
+        proj.setdefault("clones", {})[name] = {
+            "path": str(clone_path),
+            "branch": name,
+            "description": args.desc or "",
+            "status": "active",
+            "created": datetime.now(timezone.utc).isoformat(),
+        }
+        # Ensure source is up to date
+        proj["source"] = str(source)
+
+        _save_manifest(manifest)
+
+    _json_out({
+        "ok": True,
+        "project": args.project,
+        "clone": name,
+        "path": str(clone_path),
+        "branch": name,
+    })
+
+
+def cmd_switch(args) -> None:
+    """Output the path to a clone so the agent can cd there."""
+    manifest = _load_manifest()
+    _, clone = _get_clone(manifest, args.project, args.clone)
+    clone_path = Path(clone["path"])
+
+    if not clone_path.exists():
+        _error(f"clone directory missing: {clone_path}")
+
+    _json_out({"path": str(clone_path)})
+
+
+def cmd_sync(args) -> None:
+    """Sync a clone with the latest state of the primary repo."""
+    manifest = _load_manifest()
+    proj, clone = _get_clone(manifest, args.project, args.clone)
+    clone_path = Path(clone["path"])
+    source = Path(proj["source"])
+    default_br = DEFAULT_BRANCH
+
+    if not clone_path.exists():
+        _error(f"clone directory missing: {clone_path}")
+
+    # Check for dirty state
+    status = _run(["git", "status", "--porcelain"], cwd=clone_path)
+    dirty = bool(status.stdout.strip())
+
+    if dirty:
+        _run(["git", "stash"], cwd=clone_path)
+
+    # Fetch latest default branch from source
+    _run(
+        ["git", "fetch", str(source), f"{default_br}:{default_br}"],
+        cwd=clone_path,
+        check=False,
+    )
+
+    # Rebase working branch onto updated default branch
+    result = _run(
+        ["git", "rebase", default_br],
+        cwd=clone_path,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        _run(["git", "rebase", "--abort"], cwd=clone_path, check=False)
+        if dirty:
+            _run(["git", "stash", "pop"], cwd=clone_path, check=False)
+        _error(
+            f"rebase conflict — aborted. Resolve manually in {clone_path}"
+        )
+
+    if dirty:
+        _run(["git", "stash", "pop"], cwd=clone_path, check=False)
+
+    _json_out({
+        "ok": True,
+        "project": args.project,
+        "clone": args.clone,
+        "synced_from": str(source),
+    })
+
+
+def cmd_diff(args) -> None:
+    """Show changes in a clone relative to the default branch."""
+    manifest = _load_manifest()
+    proj, clone = _get_clone(manifest, args.project, args.clone)
+    clone_path = Path(clone["path"])
+    default_br = DEFAULT_BRANCH
+    branch = clone.get("branch", args.clone)
+
+    if not clone_path.exists():
+        _error(f"clone directory missing: {clone_path}")
+
+    # Commit log
+    log = _run(
+        ["git", "log", f"{default_br}..{branch}", "--oneline"],
+        cwd=clone_path,
+        check=False,
+    )
+    commits = [
+        line.strip() for line in log.stdout.strip().splitlines() if line.strip()
+    ]
+
+    # Diff stats
+    stats = _run(
+        ["git", "diff", f"{default_br}...{branch}", "--stat"],
+        cwd=clone_path,
+        check=False,
+    )
+
+    # Full diff
+    diff = _run(
+        ["git", "diff", f"{default_br}...{branch}"],
+        cwd=clone_path,
+        check=False,
+    )
+
+    _json_out({
+        "project": args.project,
+        "clone": args.clone,
+        "commits": commits,
+        "stats": stats.stdout.strip(),
+        "diff": diff.stdout,
+    })
+
+
+def cmd_accept(args) -> None:
+    """Apply clone's commits to the primary repo via format-patch + am."""
+    with _manifest_lock():
+        manifest = _load_manifest()
+        proj, clone = _get_clone(manifest, args.project, args.clone)
+        clone_path = Path(clone["path"])
+        source = Path(proj["source"])
+        default_br = DEFAULT_BRANCH
+        branch = clone.get("branch", args.clone)
+
+        if not clone_path.exists():
+            _error(f"clone directory missing: {clone_path}")
+
+        # Validate source is clean and on the default branch
+        src_branch = _run(
+            ["git", "symbolic-ref", "--short", "HEAD"], cwd=source
+        )
+        if src_branch.stdout.strip() != default_br:
+            _error(
+                f"primary repo is on '{src_branch.stdout.strip()}', "
+                f"expected '{default_br}'"
+            )
+
+        src_status = _run(["git", "status", "--porcelain"], cwd=source)
+        if src_status.stdout.strip():
+            _error("primary repo has uncommitted changes — commit or stash first")
+
+        # Generate patches
+        patches = _run(
+            ["git", "format-patch", f"{default_br}..{branch}", "--stdout"],
+            cwd=clone_path,
+        )
+
+        if not patches.stdout.strip():
+            _error("no commits to apply")
+
+        # Apply patches to source
+        apply_result = subprocess.run(
+            ["git", "am"],
+            cwd=source,
+            input=patches.stdout,
+            capture_output=True,
+            text=True,
+        )
+
+        if apply_result.returncode != 0:
+            _run(["git", "am", "--abort"], cwd=source, check=False)
+            _error(
+                f"git am failed — conflicts detected. "
+                f"Aborted. Resolve manually.\n{apply_result.stderr.strip()}"
+            )
+
+        # Count applied commits
+        commit_count = patches.stdout.count("\nFrom ")
+        if patches.stdout.startswith("From "):
+            commit_count += 1
+
+        # Update manifest
+        clone["status"] = "accepted"
+        _save_manifest(manifest)
+
+    _json_out({
+        "ok": True,
+        "project": args.project,
+        "clone": args.clone,
+        "commits_applied": commit_count,
+        "applied_to": str(source),
+    })
+
+
+def cmd_discard(args) -> None:
+    """Remove a clone and mark it as discarded."""
+    with _manifest_lock():
+        manifest = _load_manifest()
+        _, clone = _get_clone(manifest, args.project, args.clone)
+        clone_path = Path(clone["path"])
+
+        if clone_path.exists():
+            shutil.rmtree(clone_path)
+
+        clone["status"] = "discarded"
+        _save_manifest(manifest)
+
+    _json_out({
+        "ok": True,
+        "project": args.project,
+        "clone": args.clone,
+        "removed": str(clone_path),
+    })
+
+
+def cmd_cleanup(args) -> None:
+    """Clean up accepted/discarded clones and report stale ones."""
+    stale_days = args.stale_days
+
+    with _manifest_lock():
+        manifest = _load_manifest()
+        cleaned = []
+        stale = []
+        orphans = []
+
+        for proj_name, proj in list(manifest.get("projects", {}).items()):
+            clones = proj.get("clones", {})
+            to_remove = []
+
+            for clone_name, clone in clones.items():
+                status = clone.get("status", "")
+                clone_path = Path(clone["path"])
+
+                # Clean accepted/discarded
+                if status in ("accepted", "discarded"):
+                    if clone_path.exists():
+                        shutil.rmtree(clone_path)
+                    to_remove.append(clone_name)
+                    cleaned.append({
+                        "project": proj_name,
+                        "clone": clone_name,
+                        "status": status,
+                    })
+                    continue
+
+                # Report stale active clones
+                if status == "active" and clone.get("created"):
+                    try:
+                        created = datetime.fromisoformat(clone["created"])
+                        age = (datetime.now(timezone.utc) - created).days
+                        if age > stale_days:
+                            stale.append({
+                                "project": proj_name,
+                                "clone": clone_name,
+                                "age_days": age,
+                            })
+                    except (ValueError, TypeError):
+                        pass
+
+            for name in to_remove:
+                del clones[name]
+
+            # Remove project entry and empty dir if no clones remain
+            if not clones:
+                del manifest["projects"][proj_name]
+                proj_dir = CLONE_DIR / proj_name
+                if proj_dir.exists() and not any(proj_dir.iterdir()):
+                    proj_dir.rmdir()
+
+        # Detect orphan directories
+        if CLONE_DIR.exists():
+            known_paths = set()
+            for proj in manifest.get("projects", {}).values():
+                for clone in proj.get("clones", {}).values():
+                    known_paths.add(Path(clone["path"]))
+
+            for proj_dir in CLONE_DIR.iterdir():
+                if not proj_dir.is_dir() or proj_dir.name.startswith("."):
+                    continue
+                for clone_dir in proj_dir.iterdir():
+                    if clone_dir.is_dir() and clone_dir not in known_paths:
+                        orphans.append(str(clone_dir))
+
+        _save_manifest(manifest)
+
+    _json_out({
+        "cleaned": cleaned,
+        "stale": stale,
+        "orphans": orphans,
+    })
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="project",
+        description="Manage isolated project clones for agent workloads.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # list
+    p_list = sub.add_parser("list", help="List projects and their clones")
+    p_list.add_argument("query", nargs="?", default="", help="Filter by name (substring match)")
+    p_list.add_argument("--limit", type=int, default=0, help="Max results (0 = unlimited)")
+    p_list.add_argument(
+        "--status", default="all", choices=["active", "all"],
+        help="Filter clones by status",
+    )
+
+    # create
+    p_create = sub.add_parser("create", help="Create a new project clone")
+    p_create.add_argument("project", help="Project name (directory in PROJECTS_HOME)")
+    p_create.add_argument("--name", default="", help="Explicit clone name")
+    p_create.add_argument("--desc", default="", help="Description of the work")
+
+    # switch
+    p_switch = sub.add_parser("switch", help="Get path to a clone")
+    p_switch.add_argument("project", help="Project name")
+    p_switch.add_argument("clone", help="Clone name")
+
+    # sync
+    p_sync = sub.add_parser("sync", help="Sync clone with latest from primary")
+    p_sync.add_argument("project", help="Project name")
+    p_sync.add_argument("clone", help="Clone name")
+
+    # diff
+    p_diff = sub.add_parser("diff", help="Show changes in clone vs primary")
+    p_diff.add_argument("project", help="Project name")
+    p_diff.add_argument("clone", help="Clone name")
+
+    # accept
+    p_accept = sub.add_parser("accept", help="Apply clone commits to primary repo")
+    p_accept.add_argument("project", help="Project name")
+    p_accept.add_argument("clone", help="Clone name")
+
+    # discard
+    p_discard = sub.add_parser("discard", help="Remove a clone")
+    p_discard.add_argument("project", help="Project name")
+    p_discard.add_argument("clone", help="Clone name")
+
+    # cleanup
+    p_cleanup = sub.add_parser("cleanup", help="Clean up finished/stale clones")
+    p_cleanup.add_argument(
+        "--stale-days", type=int, default=7,
+        help="Report active clones older than N days (default: 7)",
+    )
+
+    args = parser.parse_args()
+
+    commands = {
+        "list": cmd_list,
+        "create": cmd_create,
+        "switch": cmd_switch,
+        "sync": cmd_sync,
+        "diff": cmd_diff,
+        "accept": cmd_accept,
+        "discard": cmd_discard,
+        "cleanup": cmd_cleanup,
+    }
+
+    commands[args.command](args)
+
+
+if __name__ == "__main__":
+    main()
