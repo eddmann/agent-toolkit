@@ -1,0 +1,904 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#   "psycopg[binary]",
+#   "mysql-connector-python",
+# ]
+# ///
+"""
+db — lightweight database CLI for AI coding agents.
+
+Supports PostgreSQL, MySQL/MariaDB, and SQLite.
+Credentials are managed externally — the agent only uses aliases.
+
+Usage:
+    db connect <url> [--alias NAME]
+    db list
+    db use <alias>
+    db drop-alias <alias>
+    db ping
+    db databases
+    db schemas
+    db tables [--views]
+    db describe <table>
+    db schema [--table TABLE]
+    db query <sql> [--params JSON] [--limit N]
+    db exec <sql> [--params JSON]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import sqlite3
+import sys
+import tempfile
+from pathlib import Path
+from urllib.parse import urlparse
+
+# ---------------------------------------------------------------------------
+# Config persistence
+# ---------------------------------------------------------------------------
+
+CONFIG_DIR = Path(os.environ.get("DB_CONFIG_DIR", Path.home() / ".config" / "agent-db"))
+CONFIG_FILE = CONFIG_DIR / "connections.json"
+
+DEFAULT_QUERY_LIMIT = 500
+CONNECT_TIMEOUT = int(os.environ.get("DB_CONNECT_TIMEOUT", "10"))
+STATEMENT_TIMEOUT = int(os.environ.get("DB_STATEMENT_TIMEOUT", "30"))
+
+
+def _error(msg: str) -> None:
+    """Print a JSON error to stderr and exit."""
+    print(json.dumps({"error": msg}), file=sys.stderr)
+    sys.exit(1)
+
+
+def _load_config() -> dict:
+    if not CONFIG_FILE.exists():
+        return {"connections": {}, "default": None}
+    try:
+        return json.loads(CONFIG_FILE.read_text())
+    except (json.JSONDecodeError, ValueError) as e:
+        _error(f"corrupt config at {CONFIG_FILE} — {e}")
+
+
+def _save_config(cfg: dict) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # atomic write: temp file then rename
+    fd, tmp = tempfile.mkstemp(dir=CONFIG_DIR, suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, CONFIG_FILE)
+        os.chmod(CONFIG_FILE, 0o600)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Connection helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_scheme(url: str) -> str:
+    """Return normalised db type from a URL or path."""
+    if url.startswith("sqlite://") or url.startswith("sqlite:"):
+        return "sqlite"
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower().split("+")[0]
+    if scheme in ("postgres", "postgresql"):
+        return "postgres"
+    if scheme in ("mysql", "mariadb"):
+        return "mysql"
+    if not scheme or scheme in ("file",):
+        return "sqlite"
+    return scheme
+
+
+def _expand_env(url: str) -> str:
+    """Expand $VAR and ${VAR} references in a URL at connect time."""
+    return os.path.expandvars(url)
+
+
+def _connect(url: str):
+    """Return (connection, db_type) for a URL."""
+    url = _expand_env(url)
+    db_type = _parse_scheme(url)
+
+    if db_type == "sqlite":
+        path = url
+        for prefix in ("sqlite:///", "sqlite://", "sqlite:"):
+            if path.startswith(prefix):
+                path = path[len(prefix):]
+                break
+        conn = sqlite3.connect(path, timeout=STATEMENT_TIMEOUT)
+        conn.row_factory = sqlite3.Row
+        return conn, "sqlite"
+
+    if db_type == "postgres":
+        import psycopg
+
+        # append connect_timeout if not already in the URL
+        sep = "&" if "?" in url else "?"
+        if "connect_timeout" not in url:
+            url = f"{url}{sep}connect_timeout={CONNECT_TIMEOUT}"
+        conn = psycopg.connect(url, autocommit=False)
+        conn.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT * 1000}")
+        return conn, "postgres"
+
+    if db_type == "mysql":
+        import mysql.connector
+
+        parsed = urlparse(url)
+        kwargs: dict = {
+            "host": parsed.hostname or "localhost",
+            "port": parsed.port or 3306,
+            "user": parsed.username or "root",
+            "database": (parsed.path or "/").lstrip("/") or None,
+            "connection_timeout": CONNECT_TIMEOUT,
+        }
+        if parsed.password:
+            kwargs["password"] = parsed.password
+        conn = mysql.connector.connect(autocommit=False, **kwargs)
+        cur = conn.cursor()
+        cur.execute(f"SET SESSION MAX_EXECUTION_TIME = {STATEMENT_TIMEOUT * 1000}")
+        cur.close()
+        return conn, "mysql"
+
+    _error(f"unsupported scheme '{db_type}'")
+
+
+def _resolve_url(args) -> str:
+    """Resolve connection URL from args or config default."""
+    if getattr(args, "url", None):
+        return args.url
+    cfg = _load_config()
+    alias = getattr(args, "alias", None) or cfg.get("default")
+    if alias and alias in cfg["connections"]:
+        return cfg["connections"][alias]
+    _error("no connection specified. use 'db connect <url>' first.")
+
+
+# ---------------------------------------------------------------------------
+# Identifier quoting (SQL injection prevention)
+# ---------------------------------------------------------------------------
+
+
+def _quote_ident(name: str, db_type: str) -> str:
+    """Quote a SQL identifier safely per backend.
+
+    - PostgreSQL/SQLite: "name" with internal " doubled
+    - MySQL/MariaDB: `name` with internal ` doubled
+    """
+    if db_type == "mysql":
+        return "`" + name.replace("`", "``") + "`"
+    return '"' + name.replace('"', '""') + '"'
+
+
+# ---------------------------------------------------------------------------
+# Schema helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_columns(cur, table: str, db_type: str, schema: str = "public") -> tuple[list[str], list[list]]:
+    """Return (column_names, rows) for a table's column metadata."""
+    if db_type == "sqlite":
+        cur.execute(f"PRAGMA table_info({_quote_ident(table, db_type)})")
+        rows = cur.fetchall()
+        return ["cid", "name", "type", "notnull", "default", "pk"], [list(r) for r in rows]
+    if db_type == "postgres":
+        cur.execute(
+            "SELECT column_name, data_type, is_nullable, column_default "
+            "FROM information_schema.columns WHERE table_schema = %s AND table_name = %s "
+            "ORDER BY ordinal_position",
+            (schema, table),
+        )
+        return ["column_name", "data_type", "nullable", "default"], [list(r) for r in cur.fetchall()]
+    if db_type == "mysql":
+        cur.execute(
+            "SELECT column_name, column_type, is_nullable, column_key, column_default, extra "
+            "FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = %s "
+            "ORDER BY ordinal_position",
+            (table,),
+        )
+        return ["field", "type", "null", "key", "default", "extra"], [list(r) for r in cur.fetchall()]
+    return [], []
+
+
+def _get_foreign_keys(cur, table: str, db_type: str, schema: str = "public") -> list[dict]:
+    """Return structured FK descriptions for a table."""
+    fks = []
+    if db_type == "sqlite":
+        cur.execute(f"PRAGMA foreign_key_list({_quote_ident(table, db_type)})")
+        for row in cur.fetchall():
+            fks.append({"column": row[3], "references_table": row[2], "references_column": row[4]})
+    elif db_type == "postgres":
+        cur.execute(
+            "SELECT kcu.column_name, ccu.table_name, ccu.column_name AS ref_column "
+            "FROM information_schema.table_constraints tc "
+            "JOIN information_schema.key_column_usage kcu "
+            "  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema "
+            "JOIN information_schema.constraint_column_usage ccu "
+            "  ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema "
+            "WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = %s AND tc.table_name = %s",
+            (schema, table),
+        )
+        for row in cur.fetchall():
+            fks.append({"column": row[0], "references_table": row[1], "references_column": row[2]})
+    elif db_type == "mysql":
+        cur.execute(
+            "SELECT column_name, referenced_table_name, referenced_column_name "
+            "FROM information_schema.key_column_usage "
+            "WHERE table_schema = DATABASE() AND table_name = %s "
+            "AND referenced_table_name IS NOT NULL",
+            (table,),
+        )
+        for row in cur.fetchall():
+            fks.append({"column": row[0], "references_table": row[1], "references_column": row[2]})
+    return fks
+
+
+def _get_indexes(cur, table: str, db_type: str, schema: str = "public") -> list[dict]:
+    """Return structured index descriptions for a table."""
+    indexes = []
+    if db_type == "sqlite":
+        cur.execute(f"PRAGMA index_list({_quote_ident(table, db_type)})")
+        for row in cur.fetchall():
+            idx_name, unique = row[1], row[2]
+            cur.execute(f"PRAGMA index_info({_quote_ident(idx_name, db_type)})")
+            cols = [r[2] for r in cur.fetchall()]
+            indexes.append({"name": idx_name, "unique": bool(unique), "columns": cols})
+    elif db_type == "postgres":
+        cur.execute(
+            "SELECT indexname, indexdef FROM pg_indexes "
+            "WHERE schemaname = %s AND tablename = %s",
+            (schema, table),
+        )
+        for row in cur.fetchall():
+            indexes.append({"name": row[0], "definition": row[1]})
+    elif db_type == "mysql":
+        cur.execute(
+            "SELECT index_name, non_unique, column_name "
+            "FROM information_schema.statistics "
+            "WHERE table_schema = DATABASE() AND table_name = %s "
+            "ORDER BY index_name, seq_in_index",
+            (table,),
+        )
+        seen = {}
+        for row in cur.fetchall():
+            key_name, non_unique, col = row[0], row[1], row[2]
+            if key_name not in seen:
+                seen[key_name] = {"name": key_name, "unique": not non_unique, "columns": []}
+            seen[key_name]["columns"].append(col)
+        indexes = list(seen.values())
+    return indexes
+
+
+# ---------------------------------------------------------------------------
+# Formatters
+# ---------------------------------------------------------------------------
+
+
+def _json_out(obj) -> None:
+    """Print a JSON object to stdout."""
+    print(json.dumps(obj, indent=2, default=str))
+
+
+# ---------------------------------------------------------------------------
+# SQL from args or stdin
+# ---------------------------------------------------------------------------
+
+
+def _read_sql(args) -> str:
+    """Read SQL from args.sql or stdin if '-'."""
+    sql = args.sql
+    if sql == "-":
+        sql = sys.stdin.read()
+    if not sql.strip():
+        _error("empty SQL")
+    return sql
+
+
+def _read_params(args) -> tuple | dict | None:
+    """Parse --params JSON into a tuple for parameterised execution."""
+    raw = getattr(args, "params", None)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        _error(f"--params must be valid JSON — {e}")
+    if isinstance(parsed, list):
+        return tuple(parsed)
+    if isinstance(parsed, dict):
+        return parsed
+    _error("--params must be a JSON array or object")
+
+
+def _normalise_placeholders(sql: str, db_type: str, has_params: bool = True) -> str:
+    """Convert ? placeholders to the backend's native format.
+
+    Allows the agent to always write `?` regardless of backend:
+    - SQLite: ? (no change)
+    - PostgreSQL/MySQL: %s
+
+    When *has_params* is True, also escapes literal `%` to `%%` for
+    %s-style backends to prevent issues with LIKE patterns (e.g.
+    '%smith%').  When *has_params* is False the escaping is skipped
+    because drivers pass the SQL through literally.
+
+    Only converts outside of quoted strings. SQL-standard escaped
+    quotes ('' inside single-quoted strings) work correctly because the
+    doubled quote toggles the state twice (on then off). Backslash escapes
+    (MySQL's \\') are NOT handled — use '' instead, which all backends accept.
+    """
+    if db_type == "sqlite":
+        return sql
+    result = []
+    in_single = False
+    in_double = False
+    in_line_comment = False
+    in_block_comment = False
+    i = 0
+    while i < len(sql):
+        c = sql[i]
+        next_c = sql[i + 1] if i + 1 < len(sql) else ""
+
+        if in_line_comment:
+            result.append(c)
+            if c == "\n":
+                in_line_comment = False
+        elif in_block_comment:
+            result.append(c)
+            if c == "*" and next_c == "/":
+                result.append("/")
+                i += 2
+                in_block_comment = False
+                continue
+        elif in_single or in_double:
+            if c == "'" and not in_double:
+                in_single = not in_single
+            elif c == '"' and not in_single:
+                in_double = not in_double
+            result.append(c)
+        else:
+            if c == "-" and next_c == "-":
+                in_line_comment = True
+                result.append(c)
+            elif c == "/" and next_c == "*":
+                in_block_comment = True
+                result.append(c)
+            elif c == "'":
+                in_single = True
+                result.append(c)
+            elif c == '"':
+                in_double = True
+                result.append(c)
+            elif c == "?":
+                result.append("%s")
+            elif c == "%" and has_params:
+                result.append("%%")
+            else:
+                result.append(c)
+        i += 1
+    return "".join(result)
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_connect(args):
+    """Save a connection and optionally set it as default."""
+    url = args.url
+    alias = args.alias
+    if not alias:
+        parsed = urlparse(_expand_env(url))
+        db_type = _parse_scheme(url)
+        if db_type == "sqlite":
+            raw = _expand_env(url)
+            for prefix in ("sqlite:///", "sqlite://", "sqlite:"):
+                if raw.startswith(prefix):
+                    raw = raw[len(prefix):]
+                    break
+            alias = Path(raw).stem or "sqlite"
+        else:
+            alias = (parsed.path or "/").lstrip("/").split("/")[0] or db_type
+
+    db_type = _parse_scheme(url)
+    try:
+        conn, db_type = _connect(url)
+        conn.close()
+    except Exception as e:
+        _error(f"could not connect — {e}")
+
+    cfg = _load_config()
+    cfg["connections"][alias] = url
+    if not cfg.get("default"):
+        cfg["default"] = alias
+    _save_config(cfg)
+    _json_out({"alias": alias, "db_type": db_type, "default": cfg["default"] == alias})
+
+
+def cmd_list(args):
+    """List saved connections."""
+    cfg = _load_config()
+    result = {"connections": []}
+    for alias, url in cfg["connections"].items():
+        result["connections"].append({
+            "alias": alias,
+            "db_type": _parse_scheme(url),
+            "default": alias == cfg.get("default"),
+        })
+    _json_out(result)
+
+
+def cmd_use(args):
+    """Set the default connection."""
+    cfg = _load_config()
+    if args.alias not in cfg["connections"]:
+        _error(f"unknown alias '{args.alias}'")
+    cfg["default"] = args.alias
+    _save_config(cfg)
+    _json_out({"default": args.alias})
+
+
+def cmd_drop_alias(args):
+    """Remove a saved connection."""
+    cfg = _load_config()
+    if args.alias not in cfg["connections"]:
+        _error(f"unknown alias '{args.alias}'")
+    del cfg["connections"][args.alias]
+    if cfg.get("default") == args.alias:
+        cfg["default"] = next(iter(cfg["connections"]), None)
+    _save_config(cfg)
+    _json_out({"removed": args.alias})
+
+
+def cmd_ping(args):
+    """Check if a connection is reachable."""
+    url = _resolve_url(args)
+    try:
+        conn, db_type = _connect(url)
+        cur = conn.cursor()
+        if db_type == "sqlite":
+            cur.execute("SELECT 1")
+        elif db_type == "postgres":
+            cur.execute("SELECT 1")
+        elif db_type == "mysql":
+            cur.execute("SELECT 1")
+        conn.close()
+        _json_out({"ok": True, "db_type": db_type})
+    except Exception as e:
+        _json_out({"ok": False, "error": str(e)})
+
+
+def cmd_databases(args):
+    """List databases on the server."""
+    url = _resolve_url(args)
+    conn, db_type = _connect(url)
+    try:
+        cur = conn.cursor()
+        if db_type == "sqlite":
+            # SQLite has no concept of multiple databases on a server
+            cur.execute("PRAGMA database_list")
+            dbs = [{"name": row[1], "file": row[2]} for row in cur.fetchall()]
+            _json_out({"db_type": db_type, "databases": dbs})
+        elif db_type == "postgres":
+            cur.execute(
+                "SELECT datname FROM pg_database "
+                "WHERE datistemplate = false ORDER BY datname"
+            )
+            dbs = [{"name": row[0]} for row in cur.fetchall()]
+            _json_out({"db_type": db_type, "databases": dbs})
+        elif db_type == "mysql":
+            cur.execute("SHOW DATABASES")
+            dbs = [{"name": row[0]} for row in cur.fetchall()]
+            _json_out({"db_type": db_type, "databases": dbs})
+        else:
+            _error(f"databases not supported for '{db_type}'")
+    finally:
+        conn.close()
+
+
+def cmd_schemas(args):
+    """List schemas in the current database."""
+    url = _resolve_url(args)
+    conn, db_type = _connect(url)
+    try:
+        cur = conn.cursor()
+        if db_type == "sqlite":
+            # SQLite doesn't have schemas
+            _json_out({"db_type": db_type, "schemas": [{"name": "main"}]})
+        elif db_type == "postgres":
+            cur.execute(
+                "SELECT schema_name FROM information_schema.schemata "
+                "WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast') "
+                "ORDER BY schema_name"
+            )
+            schemas = [{"name": row[0]} for row in cur.fetchall()]
+            _json_out({"db_type": db_type, "schemas": schemas})
+        elif db_type == "mysql":
+            # MySQL schemas = databases
+            cur.execute("SHOW DATABASES")
+            schemas = [{"name": row[0]} for row in cur.fetchall()]
+            _json_out({"db_type": db_type, "schemas": schemas})
+        else:
+            _error(f"schemas not supported for '{db_type}'")
+    finally:
+        conn.close()
+
+
+def _check_schema_flag(db_type: str, schema: str) -> None:
+    """Error if --schema is used with a backend that doesn't support it."""
+    if db_type == "mysql" and schema != "public":
+        _error("--schema is not supported for MySQL/MariaDB. Connect to the target database directly instead.")
+    if db_type == "sqlite" and schema != "public":
+        _error("--schema is not supported for SQLite.")
+
+
+def cmd_tables(args):
+    """List all tables (and optionally views)."""
+    url = _resolve_url(args)
+    conn, db_type = _connect(url)
+    schema = args.schema
+    _check_schema_flag(db_type, schema)
+    show_views = args.views
+    try:
+        cur = conn.cursor()
+        tables = []
+        if db_type == "sqlite":
+            types = "'table','view'" if show_views else "'table'"
+            cur.execute(f"SELECT name, type FROM sqlite_master WHERE type IN ({types}) AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            for row in cur.fetchall():
+                tables.append({"name": row[0], "type": row[1]})
+        elif db_type == "postgres":
+            type_filter = "('BASE TABLE', 'VIEW')" if show_views else "('BASE TABLE')"
+            cur.execute(
+                "SELECT table_name, table_type FROM information_schema.tables "
+                f"WHERE table_schema = %s AND table_type IN {type_filter} "
+                "ORDER BY table_name",
+                (schema,),
+            )
+            for row in cur.fetchall():
+                tables.append({"name": row[0], "type": "view" if row[1] == "VIEW" else "table"})
+        elif db_type == "mysql":
+            if show_views:
+                cur.execute(
+                    "SELECT table_name, table_type FROM information_schema.tables "
+                    "WHERE table_schema = DATABASE() AND table_type IN ('BASE TABLE', 'VIEW') "
+                    "ORDER BY table_name"
+                )
+                for row in cur.fetchall():
+                    tables.append({"name": row[0], "type": "view" if row[1] == "VIEW" else "table"})
+            else:
+                cur.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' "
+                    "ORDER BY table_name"
+                )
+                for row in cur.fetchall():
+                    tables.append({"name": row[0], "type": "table"})
+        _json_out({"db_type": db_type, "tables": tables})
+    finally:
+        conn.close()
+
+
+def cmd_describe(args):
+    """Describe a table's columns, foreign keys, and indexes."""
+    url = _resolve_url(args)
+    conn, db_type = _connect(url)
+    table = args.table
+    schema = args.schema
+    _check_schema_flag(db_type, schema)
+    try:
+        cur = conn.cursor()
+        columns, data = _get_columns(cur, table, db_type, schema)
+        result = {
+            "db_type": db_type,
+            "columns": [dict(zip(columns, row)) for row in data],
+        }
+        fks = _get_foreign_keys(cur, table, db_type, schema)
+        if fks:
+            result["foreign_keys"] = fks
+        idxs = _get_indexes(cur, table, db_type, schema)
+        if idxs:
+            result["indexes"] = idxs
+        _json_out(result)
+    finally:
+        conn.close()
+
+
+def cmd_schema(args):
+    """Show full schema (all tables + columns + FKs + indexes)."""
+    url = _resolve_url(args)
+    conn, db_type = _connect(url)
+    schema = args.schema
+    _check_schema_flag(db_type, schema)
+    try:
+        cur = conn.cursor()
+
+        if args.table:
+            table_names = [args.table]
+        elif db_type == "sqlite":
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            table_names = [r[0] for r in cur.fetchall()]
+        elif db_type == "postgres":
+            cur.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname = %s ORDER BY tablename",
+                (schema,),
+            )
+            table_names = [r[0] for r in cur.fetchall()]
+        elif db_type == "mysql":
+            cur.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' "
+                "ORDER BY table_name"
+            )
+            table_names = [r[0] for r in cur.fetchall()]
+        else:
+            table_names = []
+
+        tables = {}
+        for table in table_names:
+            columns, rows = _get_columns(cur, table, db_type, schema)
+            table_info = {
+                "columns": [dict(zip(columns, row)) for row in rows],
+            }
+            fks = _get_foreign_keys(cur, table, db_type, schema)
+            if fks:
+                table_info["foreign_keys"] = fks
+            idxs = _get_indexes(cur, table, db_type, schema)
+            if idxs:
+                table_info["indexes"] = idxs
+            tables[table] = table_info
+
+        _json_out({"db_type": db_type, "tables": tables})
+    finally:
+        conn.close()
+
+
+def cmd_query(args):
+    """Run a read query and display results."""
+    url = _resolve_url(args)
+    conn, db_type = _connect(url)
+    sql = _read_sql(args)
+    params = _read_params(args)
+    limit = args.limit
+    try:
+        cur = conn.cursor()
+        if params is not None:
+            cur.execute(_normalise_placeholders(sql, db_type, has_params=True), params)
+        else:
+            cur.execute(_normalise_placeholders(sql, db_type, has_params=False))
+        if limit > 0:
+            rows = cur.fetchmany(limit + 1)
+            truncated = len(rows) > limit
+            if truncated:
+                rows = rows[:limit]
+        else:
+            rows = cur.fetchall()
+            truncated = False
+        if cur.description:
+            columns = [desc[0] for desc in cur.description]
+            data = [list(r) for r in rows]
+            result = {"db_type": db_type, "rows": [dict(zip(columns, row)) for row in data]}
+            if truncated:
+                result["truncated"] = True
+                result["limit"] = limit
+            _json_out(result)
+        else:
+            _json_out({"db_type": db_type, "rows": []})
+    finally:
+        conn.close()
+
+
+def _split_statements(sql: str) -> list[str]:
+    """Split SQL into individual statements, respecting quoted strings.
+
+    Splits on `;` outside of single- and double-quoted strings.
+    Returns non-empty stripped statements.
+    """
+    statements = []
+    current = []
+    in_single = False
+    in_double = False
+    in_line_comment = False
+    in_block_comment = False
+    i = 0
+    while i < len(sql):
+        c = sql[i]
+        next_c = sql[i + 1] if i + 1 < len(sql) else ""
+
+        if in_line_comment:
+            current.append(c)
+            if c == "\n":
+                in_line_comment = False
+        elif in_block_comment:
+            current.append(c)
+            if c == "*" and next_c == "/":
+                current.append("/")
+                i += 2
+                in_block_comment = False
+                continue
+        elif in_single or in_double:
+            if c == "'" and not in_double:
+                in_single = not in_single
+            elif c == '"' and not in_single:
+                in_double = not in_double
+            current.append(c)
+        else:
+            if c == "-" and next_c == "-":
+                in_line_comment = True
+                current.append(c)
+            elif c == "/" and next_c == "*":
+                in_block_comment = True
+                current.append(c)
+            elif c == "'":
+                in_single = True
+                current.append(c)
+            elif c == '"':
+                in_double = True
+                current.append(c)
+            elif c == ";":
+                stmt = "".join(current).strip()
+                if stmt:
+                    statements.append(stmt)
+                current = []
+            else:
+                current.append(c)
+        i += 1
+    # last statement (no trailing semicolon)
+    stmt = "".join(current).strip()
+    if stmt:
+        statements.append(stmt)
+    return statements
+
+
+def cmd_exec(args):
+    """Run a write statement (INSERT/UPDATE/DELETE/DDL)."""
+    url = _resolve_url(args)
+    conn, db_type = _connect(url)
+    sql = _read_sql(args)
+    params = _read_params(args)
+    try:
+        cur = conn.cursor()
+        # multi-statement support: only when no params (params bind to a single statement)
+        if params is not None:
+            cur.execute(_normalise_placeholders(sql, db_type, has_params=True), params)
+            result = {"ok": True, "db_type": db_type}
+            if cur.description:
+                columns = [desc[0] for desc in cur.description]
+                data = [list(r) for r in cur.fetchall()]
+                result["rows"] = [dict(zip(columns, row)) for row in data]
+            affected = cur.rowcount
+            conn.commit()
+            if affected >= 0:
+                result["rows_affected"] = affected
+            _json_out(result)
+        else:
+            statements = _split_statements(sql)
+            total_affected = 0
+            last_rows = None
+            for stmt in statements:
+                cur.execute(_normalise_placeholders(stmt, db_type, has_params=False))
+                if cur.description:
+                    columns = [desc[0] for desc in cur.description]
+                    data = [list(r) for r in cur.fetchall()]
+                    last_rows = [dict(zip(columns, row)) for row in data]
+                if cur.rowcount >= 0:
+                    total_affected += cur.rowcount
+            conn.commit()
+            result = {"ok": True, "db_type": db_type, "rows_affected": total_affected, "statements": len(statements)}
+            if last_rows is not None:
+                result["rows"] = last_rows
+            _json_out(result)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def main():
+    # die quietly on broken pipe (e.g. `db tables | head`)
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+    parser = argparse.ArgumentParser(prog="db", description="Database CLI for AI coding agents")
+    sub = parser.add_subparsers(dest="command")
+
+    p = sub.add_parser("connect", help="Save a database connection")
+    p.add_argument("url", help="Connection URL (postgres://..., mysql://..., sqlite:///path, or bare path)")
+    p.add_argument("--alias", "-a", help="Name for this connection")
+
+    sub.add_parser("list", help="List saved connections")
+
+    p = sub.add_parser("use", help="Set default connection")
+    p.add_argument("alias")
+
+    p = sub.add_parser("drop-alias", help="Remove a saved connection")
+    p.add_argument("alias")
+
+    p = sub.add_parser("ping", help="Check if a connection is reachable")
+    p.add_argument("--alias", "-a", help="Connection alias")
+
+    p = sub.add_parser("databases", help="List databases on the server")
+    p.add_argument("--alias", "-a", help="Connection alias")
+
+    p = sub.add_parser("schemas", help="List schemas in the current database")
+    p.add_argument("--alias", "-a", help="Connection alias")
+
+    p = sub.add_parser("tables", help="List tables")
+    p.add_argument("--alias", "-a", help="Connection alias")
+    p.add_argument("--schema", "-s", default="public", help="Schema name (postgres, default: public)")
+    p.add_argument("--views", "-v", action="store_true", help="Include views")
+
+    p = sub.add_parser("describe", help="Describe a table")
+    p.add_argument("table")
+    p.add_argument("--alias", "-a", help="Connection alias")
+    p.add_argument("--schema", "-s", default="public", help="Schema name (postgres, default: public)")
+
+    p = sub.add_parser("schema", help="Show full schema")
+    p.add_argument("--table", "-t", help="Limit to one table")
+    p.add_argument("--alias", "-a", help="Connection alias")
+    p.add_argument("--schema", "-s", default="public", help="Schema name (postgres, default: public)")
+
+    p = sub.add_parser("query", help="Run a read query")
+    p.add_argument("sql", help="SQL query (use '-' to read from stdin)")
+    p.add_argument("--params", "-p", help="JSON array or object of query parameters")
+    p.add_argument("--alias", "-a", help="Connection alias")
+
+    p.add_argument("--limit", "-l", type=int, default=DEFAULT_QUERY_LIMIT,
+                    help=f"Max rows to return (default: {DEFAULT_QUERY_LIMIT}, 0 for unlimited)")
+
+    p = sub.add_parser("exec", help="Run a write statement")
+    p.add_argument("sql", help="SQL statement (use '-' to read from stdin)")
+    p.add_argument("--params", "-p", help="JSON array or object of query parameters")
+    p.add_argument("--alias", "-a", help="Connection alias")
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    cmd = {
+        "connect": cmd_connect,
+        "list": cmd_list,
+        "use": cmd_use,
+        "drop-alias": cmd_drop_alias,
+        "ping": cmd_ping,
+        "databases": cmd_databases,
+        "schemas": cmd_schemas,
+        "tables": cmd_tables,
+        "describe": cmd_describe,
+        "schema": cmd_schema,
+        "query": cmd_query,
+        "exec": cmd_exec,
+    }[args.command]
+
+    try:
+        cmd(args)
+    except Exception as e:
+        print(json.dumps({"error": str(e)}), file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
