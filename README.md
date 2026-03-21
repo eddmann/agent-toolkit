@@ -2,6 +2,12 @@
 
 A collection of skills, extensions, and prompts that I use across different AI coding agent harnesses.
 
+## Installation
+
+**Claude Code:** Run `./claude-code-install.sh` to fetch third-party skills and symlink everything into `~/.claude/skills/`. Safe to re-run — only touches skills it manages.
+
+**Other harnesses:** Run `./third-party-skills/install.sh` to fetch third-party skills into `third-party-skills/installed/`, then point your harness at `skills/` and `third-party-skills/installed/` directly.
+
 ## Structure
 
 ### `skills/`
@@ -10,7 +16,7 @@ Reusable agent skills — self-contained prompt-based capabilities that can be p
 
 ### `third-party-skills/`
 
-Third-party skills managed via `manifest.json`. Run `./third-party-skills/install.sh` to fetch them into `third-party-skills/installed/`. Each skill is pinned to a specific commit for reproducibility. The `installed/` directory is gitignored — only the manifest is tracked.
+Third-party skills managed via `manifest.json`. Each skill is pinned to a specific commit for reproducibility. The `installed/` directory is gitignored — only the manifest is tracked.
 
 Current third-party skills:
 
