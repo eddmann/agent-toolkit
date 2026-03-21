@@ -10,21 +10,17 @@
 db — lightweight database CLI for AI coding agents.
 
 Supports PostgreSQL, MySQL/MariaDB, and SQLite.
-Credentials are managed externally — the agent only uses aliases.
+Connections are managed via a JSON file — the agent only uses aliases.
 
 Usage:
-    db connect <url> [--alias NAME]
-    db list
-    db use <alias>
-    db drop-alias <alias>
-    db ping
-    db databases
-    db schemas
-    db tables [--views]
-    db describe <table>
-    db schema [--table TABLE]
-    db query <sql> [--params JSON] [--limit N]
-    db exec <sql> [--params JSON]
+    db ping --alias NAME
+    db databases --alias NAME
+    db schemas --alias NAME
+    db tables --alias NAME [--views]
+    db describe <table> --alias NAME
+    db schema --alias NAME [--table TABLE]
+    db query <sql> --alias NAME [--params JSON] [--limit N]
+    db exec <sql> --alias NAME [--params JSON]
 """
 
 from __future__ import annotations
@@ -35,12 +31,11 @@ import os
 import signal
 import sqlite3
 import sys
-import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
-# Config persistence
+# Config
 # ---------------------------------------------------------------------------
 
 CONFIG_DIR = Path(os.environ.get("DB_CONFIG_DIR", Path.home() / ".config" / "agent-db"))
@@ -59,29 +54,11 @@ def _error(msg: str) -> None:
 
 def _load_config() -> dict:
     if not CONFIG_FILE.exists():
-        return {"connections": {}, "default": None}
+        return {"connections": {}}
     try:
         return json.loads(CONFIG_FILE.read_text())
     except (json.JSONDecodeError, ValueError) as e:
         _error(f"corrupt config at {CONFIG_FILE} — {e}")
-
-
-def _save_config(cfg: dict) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    # atomic write: temp file then rename
-    fd, tmp = tempfile.mkstemp(dir=CONFIG_DIR, suffix=".json")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(cfg, f, indent=2)
-            f.write("\n")
-        os.replace(tmp, CONFIG_FILE)
-        os.chmod(CONFIG_FILE, 0o600)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 # ---------------------------------------------------------------------------
@@ -158,14 +135,14 @@ def _connect(url: str):
 
 
 def _resolve_url(args) -> str:
-    """Resolve connection URL from args or config default."""
-    if getattr(args, "url", None):
-        return args.url
+    """Resolve connection URL from the --alias flag."""
+    alias = getattr(args, "alias", None)
+    if not alias:
+        _error("--alias is required. specify which connection to use.")
     cfg = _load_config()
-    alias = getattr(args, "alias", None) or cfg.get("default")
-    if alias and alias in cfg["connections"]:
-        return cfg["connections"][alias]
-    _error("no connection specified. use 'db connect <url>' first.")
+    if alias not in cfg["connections"]:
+        _error(f"unknown alias '{alias}'. add it to {CONFIG_FILE}.")
+    return cfg["connections"][alias]
 
 
 # ---------------------------------------------------------------------------
@@ -397,73 +374,6 @@ def _normalise_placeholders(sql: str, db_type: str, has_params: bool = True) -> 
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
-
-
-def cmd_connect(args):
-    """Save a connection and optionally set it as default."""
-    url = args.url
-    alias = args.alias
-    if not alias:
-        parsed = urlparse(_expand_env(url))
-        db_type = _parse_scheme(url)
-        if db_type == "sqlite":
-            raw = _expand_env(url)
-            for prefix in ("sqlite:///", "sqlite://", "sqlite:"):
-                if raw.startswith(prefix):
-                    raw = raw[len(prefix):]
-                    break
-            alias = Path(raw).stem or "sqlite"
-        else:
-            alias = (parsed.path or "/").lstrip("/").split("/")[0] or db_type
-
-    db_type = _parse_scheme(url)
-    try:
-        conn, db_type = _connect(url)
-        conn.close()
-    except Exception as e:
-        _error(f"could not connect — {e}")
-
-    cfg = _load_config()
-    cfg["connections"][alias] = url
-    if not cfg.get("default"):
-        cfg["default"] = alias
-    _save_config(cfg)
-    _json_out({"alias": alias, "db_type": db_type, "default": cfg["default"] == alias})
-
-
-def cmd_list(args):
-    """List saved connections."""
-    cfg = _load_config()
-    result = {"connections": []}
-    for alias, url in cfg["connections"].items():
-        result["connections"].append({
-            "alias": alias,
-            "db_type": _parse_scheme(url),
-            "default": alias == cfg.get("default"),
-        })
-    _json_out(result)
-
-
-def cmd_use(args):
-    """Set the default connection."""
-    cfg = _load_config()
-    if args.alias not in cfg["connections"]:
-        _error(f"unknown alias '{args.alias}'")
-    cfg["default"] = args.alias
-    _save_config(cfg)
-    _json_out({"default": args.alias})
-
-
-def cmd_drop_alias(args):
-    """Remove a saved connection."""
-    cfg = _load_config()
-    if args.alias not in cfg["connections"]:
-        _error(f"unknown alias '{args.alias}'")
-    del cfg["connections"][args.alias]
-    if cfg.get("default") == args.alias:
-        cfg["default"] = next(iter(cfg["connections"]), None)
-    _save_config(cfg)
-    _json_out({"removed": args.alias})
 
 
 def cmd_ping(args):
@@ -822,56 +732,36 @@ def main():
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
     parser = argparse.ArgumentParser(prog="db", description="Database CLI for AI coding agents")
+    parser.add_argument("--alias", "-a", required=True, help="Connection alias")
     sub = parser.add_subparsers(dest="command")
 
-    p = sub.add_parser("connect", help="Save a database connection")
-    p.add_argument("url", help="Connection URL (postgres://..., mysql://..., sqlite:///path, or bare path)")
-    p.add_argument("--alias", "-a", help="Name for this connection")
+    sub.add_parser("ping", help="Check if a connection is reachable")
 
-    sub.add_parser("list", help="List saved connections")
+    sub.add_parser("databases", help="List databases on the server")
 
-    p = sub.add_parser("use", help="Set default connection")
-    p.add_argument("alias")
-
-    p = sub.add_parser("drop-alias", help="Remove a saved connection")
-    p.add_argument("alias")
-
-    p = sub.add_parser("ping", help="Check if a connection is reachable")
-    p.add_argument("--alias", "-a", help="Connection alias")
-
-    p = sub.add_parser("databases", help="List databases on the server")
-    p.add_argument("--alias", "-a", help="Connection alias")
-
-    p = sub.add_parser("schemas", help="List schemas in the current database")
-    p.add_argument("--alias", "-a", help="Connection alias")
+    sub.add_parser("schemas", help="List schemas in the current database")
 
     p = sub.add_parser("tables", help="List tables")
-    p.add_argument("--alias", "-a", help="Connection alias")
     p.add_argument("--schema", "-s", default="public", help="Schema name (postgres, default: public)")
     p.add_argument("--views", "-v", action="store_true", help="Include views")
 
     p = sub.add_parser("describe", help="Describe a table")
     p.add_argument("table")
-    p.add_argument("--alias", "-a", help="Connection alias")
     p.add_argument("--schema", "-s", default="public", help="Schema name (postgres, default: public)")
 
     p = sub.add_parser("schema", help="Show full schema")
     p.add_argument("--table", "-t", help="Limit to one table")
-    p.add_argument("--alias", "-a", help="Connection alias")
     p.add_argument("--schema", "-s", default="public", help="Schema name (postgres, default: public)")
 
     p = sub.add_parser("query", help="Run a read query")
     p.add_argument("sql", help="SQL query (use '-' to read from stdin)")
     p.add_argument("--params", "-p", help="JSON array or object of query parameters")
-    p.add_argument("--alias", "-a", help="Connection alias")
-
     p.add_argument("--limit", "-l", type=int, default=DEFAULT_QUERY_LIMIT,
                     help=f"Max rows to return (default: {DEFAULT_QUERY_LIMIT}, 0 for unlimited)")
 
     p = sub.add_parser("exec", help="Run a write statement")
     p.add_argument("sql", help="SQL statement (use '-' to read from stdin)")
     p.add_argument("--params", "-p", help="JSON array or object of query parameters")
-    p.add_argument("--alias", "-a", help="Connection alias")
 
     args = parser.parse_args()
     if not args.command:
@@ -879,10 +769,6 @@ def main():
         sys.exit(1)
 
     cmd = {
-        "connect": cmd_connect,
-        "list": cmd_list,
-        "use": cmd_use,
-        "drop-alias": cmd_drop_alias,
         "ping": cmd_ping,
         "databases": cmd_databases,
         "schemas": cmd_schemas,

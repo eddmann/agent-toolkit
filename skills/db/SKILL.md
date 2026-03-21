@@ -10,29 +10,35 @@ Single CLI for PostgreSQL, MySQL/MariaDB, and SQLite. All output is JSON. Use `$
 
 ## Connections
 
-Ask the **user** to run `connect` (contains credentials — never run this yourself). First connection becomes the default. Alias is auto-derived from URL if `--alias` is omitted.
+Connections are stored in `~/.config/agent-db/connections.json` (override path with `$DB_CONFIG_DIR`). The user must manage this file directly — **never create or edit it yourself**. Ask the user to add their connection if the alias they want is missing.
 
-```bash
-scripts/db connect postgres://user:pass@host:5432/mydb --alias prod
-scripts/db connect /path/to/data.db
-scripts/db list                    # saved connections
-scripts/db use <alias>             # switch default
-scripts/db drop-alias <alias>
-scripts/db ping                    # test default connection
+Example `connections.json`:
+```json
+{
+  "connections": {
+    "prod": "postgres://user:pass@host:5432/mydb",
+    "local": "sqlite:///path/to/data.db",
+    "staging": "mysql://user:pass@host:3306/app"
+  }
+}
 ```
 
-Any command that hits the database accepts `--alias <name>` to target a specific connection.
+```bash
+scripts/db --alias <alias> ping    # test a connection
+```
+
+**Every command requires `--alias <name>` before the subcommand** to specify which connection to use. If the alias doesn't exist, tell the user to update `connections.json`.
 
 ## Schema exploration
 
 Always explore schema before writing queries against an unfamiliar database.
 
 ```bash
-scripts/db databases                          # list databases on server
-scripts/db schemas                            # list schemas in current database
-scripts/db tables [--views] [--schema <name>] # list tables [and views]
-scripts/db describe <table> [--schema <name>] # columns, FKs, indexes
-scripts/db schema [--table <name>]            # full schema or single table
+scripts/db --alias <alias> databases                          # list databases on server
+scripts/db --alias <alias> schemas                            # list schemas in current database
+scripts/db --alias <alias> tables [--views] [--schema <name>] # list tables [and views]
+scripts/db --alias <alias> describe <table> [--schema <name>] # columns, FKs, indexes
+scripts/db --alias <alias> schema [--table <name>]            # full schema or single table
 ```
 
 `--schema <name>` selects a non-public schema (postgres only, default: `public`).
@@ -40,18 +46,18 @@ scripts/db schema [--table <name>]            # full schema or single table
 ## Queries
 
 ```bash
-scripts/db query "SELECT * FROM users WHERE id = ?" --params '[42]'
-scripts/db query "SELECT * FROM users"              # default limit: 500 rows
-scripts/db query "SELECT * FROM users" --limit 0    # unlimited
-cat query.sql | scripts/db query -                  # SQL from stdin
+scripts/db --alias <alias> query "SELECT * FROM users WHERE id = ?" --params '[42]'
+scripts/db --alias <alias> query "SELECT * FROM users"              # default limit: 500 rows
+scripts/db --alias <alias> query "SELECT * FROM users" --limit 0    # unlimited
+cat query.sql | scripts/db --alias <alias> query -                  # SQL from stdin
 ```
 
 ## Writes
 
 ```bash
-scripts/db exec "INSERT INTO t (a, b) VALUES (?, ?)" --params '["x", 1]'
-scripts/db exec "CREATE TABLE t (id SERIAL PRIMARY KEY, name TEXT)"
-cat migration.sql | scripts/db exec -               # multi-statement (no --params)
+scripts/db --alias <alias> exec "INSERT INTO t (a, b) VALUES (?, ?)" --params '["x", 1]'
+scripts/db --alias <alias> exec "CREATE TABLE t (id SERIAL PRIMARY KEY, name TEXT)"
+cat migration.sql | scripts/db --alias <alias> exec -               # multi-statement (no --params)
 ```
 
 `exec` auto-commits on success, rolls back on error. Returns `rows_affected` and supports `RETURNING`.
@@ -74,9 +80,9 @@ JSON to stdout. Errors: `{"error": "..."}` to stderr with non-zero exit.
 
 ```bash
 # CORRECT
-scripts/db query "SELECT * FROM users WHERE email = ?" --params '["a@b.com"]'
+scripts/db --alias <alias> query "SELECT * FROM users WHERE email = ?" --params '["a@b.com"]'
 # WRONG — SQL injection risk
-scripts/db query "SELECT * FROM users WHERE email = 'a@b.com'"
+scripts/db --alias <alias> query "SELECT * FROM users WHERE email = 'a@b.com'"
 ```
 
 `?` is auto-converted to the backend's native format. Exception: DDL and queries with no user-supplied data don't need `--params`.
