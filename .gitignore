@@ -1,3 +1,31 @@
 node_modules/
 .DS_Store
 third-party-skills/installed/
+
+# Environment
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+
+# Build outputs
+dist/
+build/
+out/
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Coverage
+coverage/
