@@ -4,6 +4,8 @@
 # dependencies = [
 #   "psycopg[binary]",
 #   "mysql-connector-python",
+#   "sshtunnel>=0.4.0",
+#   "paramiko<4",
 # ]
 # ///
 """
@@ -32,7 +34,7 @@ import signal
 import sqlite3
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 # ---------------------------------------------------------------------------
 # Config
@@ -86,10 +88,39 @@ def _expand_env(url: str) -> str:
     return os.path.expandvars(url)
 
 
-def _connect(url: str):
-    """Return (connection, db_type) for a URL."""
+def _open_tunnel(ssh_config: dict, remote_host: str, remote_port: int):
+    """Open an SSH tunnel and return the SSHTunnelForwarder instance.
+
+    The tunnel forwards a random local port to remote_host:remote_port
+    through the SSH server specified in ssh_config.
+    """
+    from sshtunnel import SSHTunnelForwarder
+
+    kwargs: dict = {
+        "ssh_address_or_host": (ssh_config["host"], ssh_config.get("port", 22)),
+        "remote_bind_address": (remote_host, remote_port),
+    }
+    if "user" in ssh_config:
+        kwargs["ssh_username"] = ssh_config["user"]
+    if "key" in ssh_config:
+        kwargs["ssh_pkey"] = os.path.expanduser(ssh_config["key"])
+    # Fall back to SSH agent / default keys when no key is specified
+
+    tunnel = SSHTunnelForwarder(**kwargs)
+    tunnel.start()
+    return tunnel
+
+
+def _connect(url: str, ssh_config: dict | None = None):
+    """Return (connection, db_type, tunnel) for a URL.
+
+    When ssh_config is provided, an SSH tunnel is opened first and the
+    connection goes through it. The caller must call tunnel.stop() when done
+    (or pass tunnel to _close).
+    """
     url = _expand_env(url)
     db_type = _parse_scheme(url)
+    tunnel = None
 
     if db_type == "sqlite":
         path = url
@@ -99,50 +130,83 @@ def _connect(url: str):
                 break
         conn = sqlite3.connect(path, timeout=STATEMENT_TIMEOUT)
         conn.row_factory = sqlite3.Row
-        return conn, "sqlite"
+        return conn, "sqlite", None
+
+    # For non-SQLite, open SSH tunnel if configured
+    parsed = urlparse(url)
+    if ssh_config:
+        remote_host = parsed.hostname or "127.0.0.1"
+        remote_port = parsed.port or (5432 if db_type == "postgres" else 3306)
+        tunnel = _open_tunnel(ssh_config, remote_host, remote_port)
 
     if db_type == "postgres":
         import psycopg
 
-        # append connect_timeout if not already in the URL
-        sep = "&" if "?" in url else "?"
-        if "connect_timeout" not in url:
-            url = f"{url}{sep}connect_timeout={CONNECT_TIMEOUT}"
-        conn = psycopg.connect(url, autocommit=False)
+        if tunnel:
+            # Rewrite URL to point at the local tunnel endpoint
+            local_url = parsed._replace(
+                netloc=f"{parsed.username}:{parsed.password}@127.0.0.1:{tunnel.local_bind_port}"
+                if parsed.password
+                else f"{parsed.username}@127.0.0.1:{tunnel.local_bind_port}"
+            ).geturl()
+        else:
+            local_url = url
+
+        sep = "&" if "?" in local_url else "?"
+        if "connect_timeout" not in local_url:
+            local_url = f"{local_url}{sep}connect_timeout={CONNECT_TIMEOUT}"
+        conn = psycopg.connect(local_url, autocommit=False)
         conn.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT * 1000}")
-        return conn, "postgres"
+        return conn, "postgres", tunnel
 
     if db_type == "mysql":
         import mysql.connector
 
-        parsed = urlparse(url)
         kwargs: dict = {
-            "host": parsed.hostname or "localhost",
-            "port": parsed.port or 3306,
+            "host": "127.0.0.1" if tunnel else (parsed.hostname or "localhost"),
+            "port": tunnel.local_bind_port if tunnel else (parsed.port or 3306),
             "user": parsed.username or "root",
             "database": (parsed.path or "/").lstrip("/") or None,
             "connection_timeout": CONNECT_TIMEOUT,
         }
         if parsed.password:
-            kwargs["password"] = parsed.password
+            kwargs["password"] = unquote(parsed.password)
         conn = mysql.connector.connect(autocommit=False, **kwargs)
         cur = conn.cursor()
-        cur.execute(f"SET SESSION MAX_EXECUTION_TIME = {STATEMENT_TIMEOUT * 1000}")
+        try:
+            cur.execute(f"SET SESSION MAX_EXECUTION_TIME = {STATEMENT_TIMEOUT * 1000}")
+        except Exception:
+            # MariaDB uses max_statement_time (in seconds) instead
+            cur.execute(f"SET SESSION max_statement_time = {STATEMENT_TIMEOUT}")
         cur.close()
-        return conn, "mysql"
+        return conn, "mysql", tunnel
 
     _error(f"unsupported scheme '{db_type}'")
 
 
-def _resolve_url(args) -> str:
-    """Resolve connection URL from the --alias flag."""
+def _resolve_url(args) -> tuple[str, dict | None]:
+    """Resolve connection URL and optional SSH config from the --alias flag.
+
+    Returns (url, ssh_config) where ssh_config is None for direct connections
+    or a dict with 'host' (required), 'user', 'port', 'key' for tunnelled ones.
+
+    Connection entries can be a plain URL string or an object:
+        "alias": "mysql://user:pass@host:3306/db"
+        "alias": {"url": "mysql://user:pass@127.0.0.1:3306/db", "ssh": {"host": "server.example.com", "user": "edd"}}
+    """
     alias = getattr(args, "alias", None)
     if not alias:
         _error("--alias is required. specify which connection to use.")
     cfg = _load_config()
     if alias not in cfg["connections"]:
         _error(f"unknown alias '{alias}'. add it to {CONFIG_FILE}.")
-    return cfg["connections"][alias]
+    entry = cfg["connections"][alias]
+    if isinstance(entry, str):
+        return entry, None
+    if isinstance(entry, dict):
+        if "url" not in entry:
+            _error(f"connection '{alias}' is an object but missing 'url' key.")
+        return entry["url"], entry.get("ssh")
 
 
 # ---------------------------------------------------------------------------
@@ -376,11 +440,18 @@ def _normalise_placeholders(sql: str, db_type: str, has_params: bool = True) -> 
 # ---------------------------------------------------------------------------
 
 
+def _close(conn, tunnel=None):
+    """Close a database connection and its SSH tunnel (if any)."""
+    conn.close()
+    if tunnel:
+        tunnel.stop()
+
+
 def cmd_ping(args):
     """Check if a connection is reachable."""
-    url = _resolve_url(args)
+    url, ssh_config = _resolve_url(args)
     try:
-        conn, db_type = _connect(url)
+        conn, db_type, tunnel = _connect(url, ssh_config)
         cur = conn.cursor()
         if db_type == "sqlite":
             cur.execute("SELECT 1")
@@ -388,7 +459,7 @@ def cmd_ping(args):
             cur.execute("SELECT 1")
         elif db_type == "mysql":
             cur.execute("SELECT 1")
-        conn.close()
+        _close(conn, tunnel)
         _json_out({"ok": True, "db_type": db_type})
     except Exception as e:
         _json_out({"ok": False, "error": str(e)})
@@ -396,8 +467,8 @@ def cmd_ping(args):
 
 def cmd_databases(args):
     """List databases on the server."""
-    url = _resolve_url(args)
-    conn, db_type = _connect(url)
+    url, ssh_config = _resolve_url(args)
+    conn, db_type, tunnel = _connect(url, ssh_config)
     try:
         cur = conn.cursor()
         if db_type == "sqlite":
@@ -419,13 +490,13 @@ def cmd_databases(args):
         else:
             _error(f"databases not supported for '{db_type}'")
     finally:
-        conn.close()
+        _close(conn, tunnel)
 
 
 def cmd_schemas(args):
     """List schemas in the current database."""
-    url = _resolve_url(args)
-    conn, db_type = _connect(url)
+    url, ssh_config = _resolve_url(args)
+    conn, db_type, tunnel = _connect(url, ssh_config)
     try:
         cur = conn.cursor()
         if db_type == "sqlite":
@@ -447,7 +518,7 @@ def cmd_schemas(args):
         else:
             _error(f"schemas not supported for '{db_type}'")
     finally:
-        conn.close()
+        _close(conn, tunnel)
 
 
 def _check_schema_flag(db_type: str, schema: str) -> None:
@@ -460,8 +531,8 @@ def _check_schema_flag(db_type: str, schema: str) -> None:
 
 def cmd_tables(args):
     """List all tables (and optionally views)."""
-    url = _resolve_url(args)
-    conn, db_type = _connect(url)
+    url, ssh_config = _resolve_url(args)
+    conn, db_type, tunnel = _connect(url, ssh_config)
     schema = args.schema
     _check_schema_flag(db_type, schema)
     show_views = args.views
@@ -502,13 +573,13 @@ def cmd_tables(args):
                     tables.append({"name": row[0], "type": "table"})
         _json_out({"db_type": db_type, "tables": tables})
     finally:
-        conn.close()
+        _close(conn, tunnel)
 
 
 def cmd_describe(args):
     """Describe a table's columns, foreign keys, and indexes."""
-    url = _resolve_url(args)
-    conn, db_type = _connect(url)
+    url, ssh_config = _resolve_url(args)
+    conn, db_type, tunnel = _connect(url, ssh_config)
     table = args.table
     schema = args.schema
     _check_schema_flag(db_type, schema)
@@ -527,13 +598,13 @@ def cmd_describe(args):
             result["indexes"] = idxs
         _json_out(result)
     finally:
-        conn.close()
+        _close(conn, tunnel)
 
 
 def cmd_schema(args):
     """Show full schema (all tables + columns + FKs + indexes)."""
-    url = _resolve_url(args)
-    conn, db_type = _connect(url)
+    url, ssh_config = _resolve_url(args)
+    conn, db_type, tunnel = _connect(url, ssh_config)
     schema = args.schema
     _check_schema_flag(db_type, schema)
     try:
@@ -576,13 +647,13 @@ def cmd_schema(args):
 
         _json_out({"db_type": db_type, "tables": tables})
     finally:
-        conn.close()
+        _close(conn, tunnel)
 
 
 def cmd_query(args):
     """Run a read query and display results."""
-    url = _resolve_url(args)
-    conn, db_type = _connect(url)
+    url, ssh_config = _resolve_url(args)
+    conn, db_type, tunnel = _connect(url, ssh_config)
     sql = _read_sql(args)
     params = _read_params(args)
     limit = args.limit
@@ -611,7 +682,7 @@ def cmd_query(args):
         else:
             _json_out({"db_type": db_type, "rows": []})
     finally:
-        conn.close()
+        _close(conn, tunnel)
 
 
 def _split_statements(sql: str) -> list[str]:
@@ -678,8 +749,8 @@ def _split_statements(sql: str) -> list[str]:
 
 def cmd_exec(args):
     """Run a write statement (INSERT/UPDATE/DELETE/DDL)."""
-    url = _resolve_url(args)
-    conn, db_type = _connect(url)
+    url, ssh_config = _resolve_url(args)
+    conn, db_type, tunnel = _connect(url, ssh_config)
     sql = _read_sql(args)
     params = _read_params(args)
     try:
@@ -718,7 +789,7 @@ def cmd_exec(args):
         conn.rollback()
         raise
     finally:
-        conn.close()
+        _close(conn, tunnel)
 
 
 # ---------------------------------------------------------------------------

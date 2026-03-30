@@ -18,10 +18,16 @@ Example `connections.json`:
   "connections": {
     "prod": "postgres://user:pass@host:5432/mydb",
     "local": "sqlite:///path/to/data.db",
-    "staging": "mysql://user:pass@host:3306/app"
+    "staging": "mysql://user:pass@host:3306/app",
+    "remote": {
+      "url": "mysql://user:pass@127.0.0.1:3306/mydb",
+      "ssh": {"host": "server.example.com", "user": "deploy", "port": 22}
+    }
   }
 }
 ```
+
+Connections can be a plain URL string or an object with `url` + `ssh` keys for SSH-tunnelled access. The `ssh` object supports `host` (required), `user`, `port` (default 22), and `key` (path to private key, defaults to SSH agent).
 
 ```bash
 scripts/db --alias <alias> ping    # test a connection
