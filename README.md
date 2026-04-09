@@ -6,6 +6,8 @@ A collection of skills, extensions, and prompts that I use across different AI c
 
 **Claude Code:** Run `./claude-code-install.sh` to fetch third-party skills and symlink everything into `~/.claude/skills/`. Safe to re-run — only touches skills it manages.
 
+**Codex:** Run `./codex-install.sh` to fetch third-party skills and symlink everything into `$CODEX_HOME/skills/` (defaults to `~/.codex/skills/`). Safe to re-run — only touches skills it manages and preserves Codex's built-in `.system` skills.
+
 **Other harnesses:** Run `./third-party-skills/install.sh` to fetch third-party skills into `third-party-skills/installed/`, then point your harness at `skills/` and `third-party-skills/installed/` directly.
 
 ## Structure
