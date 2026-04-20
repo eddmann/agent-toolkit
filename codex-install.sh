@@ -5,13 +5,52 @@
 # - never removes skills it doesn't own
 # - safe to re-run - keeps everything in sync
 # - preserves Codex's preinstalled ~/.codex/skills/.system skills
+# - set SKIP_SKILLS="name1 name2" to omit specific skills (removes any
+#   previously-linked copies of those skills)
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+_SCRIPT_RAW_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+if command -v realpath >/dev/null 2>&1; then
+  SCRIPT_DIR="$(realpath "$_SCRIPT_RAW_DIR")"
+else
+  SCRIPT_DIR="$_SCRIPT_RAW_DIR"
+fi
 SKILLS_DIR="$SCRIPT_DIR/skills"
 THIRD_PARTY_DIR="$SCRIPT_DIR/third-party-skills"
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 CODEX_SKILLS="$CODEX_HOME/skills"
+SKIP_SKILLS="${SKIP_SKILLS:-}"
+
+# resolve a path to its canonical form (follows symlinks, normalises case
+# on case-insensitive filesystems). prefers realpath; falls back to a
+# pwd -P approximation when realpath is unavailable
+canonical_path() {
+  local p="$1"
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$p" 2>/dev/null || printf '%s\n' "$p"
+  elif [ -d "$p" ]; then
+    (cd "$p" && pwd -P)
+  elif [ -e "$p" ] || [ -L "$p" ]; then
+    local dir base
+    dir="$(dirname "$p")"
+    base="$(basename "$p")"
+    if [ -d "$dir" ]; then
+      printf '%s/%s\n' "$(cd "$dir" && pwd -P)" "$base"
+    else
+      printf '%s\n' "$p"
+    fi
+  else
+    printf '%s\n' "$p"
+  fi
+}
+
+is_skipped() {
+  local name="$1" skip
+  for skip in $SKIP_SKILLS; do
+    [ "$skip" = "$name" ] && return 0
+  done
+  return 1
+}
 
 if [ -e "$CODEX_SKILLS" ] && ! [ -d "$CODEX_SKILLS" ]; then
   echo "error: $CODEX_SKILLS exists and is not a directory" >&2
@@ -25,7 +64,10 @@ is_managed_target() {
 
   [ -L "$target" ] || return 1
 
-  case "$(readlink "$target")" in
+  local resolved
+  resolved="$(canonical_path "$(readlink "$target")")"
+
+  case "$resolved" in
     "$SCRIPT_DIR"/*) return 0 ;;
     *) return 1 ;;
   esac
@@ -35,7 +77,17 @@ link_skill() {
   local source="$1" name="$2"
   local target="$CODEX_SKILLS/$name"
 
-  if [ -L "$target" ] && [ "$(readlink "$target")" = "$source" ]; then
+  if is_skipped "$name"; then
+    if [ -L "$target" ] && is_managed_target "$target"; then
+      rm -f "$target"
+      echo "  $name (skipped - removed managed symlink)"
+    else
+      echo "  $name (skipped)"
+    fi
+    return
+  fi
+
+  if [ -L "$target" ] && [ "$(canonical_path "$(readlink "$target")")" = "$(canonical_path "$source")" ]; then
     echo "  $name (up to date)"
     return
   fi
