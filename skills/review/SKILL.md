@@ -1,6 +1,6 @@
 ---
 name: review
-description: "Review code against coding guidelines and best practices"
+description: "Use when reviewing local code against repository conventions and coding guidelines."
 argument-hint: <file, directory, or area>
 config:
   GUIDELINES_DIR:
@@ -8,76 +8,37 @@ config:
     default: "/Users/edd/Projects/agent-guidelines"
 ---
 
-ultrathink: Perform a thorough code review by first reading all relevant code and guidelines, then providing specific, actionable feedback.
+# Review
 
-## Your Task
+Review the requested files or area for correctness and the simplest sufficient implementation.
+Keep the review read-only unless fixes are also requested. Preserve unrelated work.
 
-Review: $ARGUMENTS
+## Guidelines
 
-## Context
+Read repository instructions and the relevant standards under `GUIDELINES_DIR`, defaulting to
+`/Users/edd/Projects/agent-guidelines` when unset:
 
-- Current directory: !`pwd`
-- Git status: !`git status --short 2>/dev/null | head -20`
+- `foundation/code-philosophy.md`
+- `practices/clean-code-practices.md`
+- `practices/design-principles.md`
+- `practices/testing.md`
+- `practices/error-handling.md`
 
-## Guidelines to Apply
+Repository-specific requirements take precedence over general preferences. If a guideline file
+is unavailable, state the gap and continue with available repository guidance and code evidence.
 
-Read and apply these standards from the guidelines directory (`$GUIDELINES_DIR`):
-- `$GUIDELINES_DIR/foundation/code-philosophy.md`
-- `$GUIDELINES_DIR/practices/clean-code-practices.md`
-- `$GUIDELINES_DIR/practices/design-principles.md`
-- `$GUIDELINES_DIR/practices/testing.md`
-- `$GUIDELINES_DIR/practices/error-handling.md`
+## Review And Report
 
-## Instructions
+1. Establish the intended behavior and scope from the request, code and tests. Trace relevant
+   callers and dependencies; inspect the diff when reviewing changes.
+2. Look for concrete failure cases and avoidable complexity. Flag unnecessary abstractions,
+   speculative features or redundant tests only when their cost is clear. Prefer existing
+   patterns and the smallest sufficient fix; do not turn style preferences into blockers.
+3. Use focused checks when they help verify a finding. Distinguish observed behavior from
+   inference, and do not claim checks that were not run.
+4. Report blockers first, then worthwhile optional improvements. For each finding, include
+   file/line evidence, the trigger or concrete concern, impact and a suggested fix. Cite the
+   relevant guideline when the finding depends on one.
 
-### Phase 1: Load Guidelines
-
-First, read ALL the guideline files above. Understand:
-- Code philosophy: predictable, boring, declarative, immutable
-- Clean code: small functions, descriptive naming, early returns, no magic numbers
-- Design: KISS, single responsibility, dependency injection, composition
-- Testing: classical school, behavior-focused, AAA pattern, stubs over mocks
-- Errors: fail fast, don't hide failures, validate at boundaries
-
-### Phase 2: Read the Code
-
-Thoroughly read the code to review:
-1. **Read all relevant files** in the target area
-2. **Understand the context** - what does this code do?
-3. **Trace dependencies** - what does it interact with?
-4. **Check tests** - are behaviors well-tested?
-
-### Phase 3: Evaluate Against Guidelines
-
-For each issue found:
-1. **Identify the specific guideline** being violated
-2. **Quote the relevant code** with file:line reference
-3. **Explain why it matters** - what's the risk or cost?
-4. **Suggest a fix** - be specific and actionable
-
-### Phase 4: Provide Summary
-
-Organize your review:
-1. **Critical issues** - must fix, violates core principles
-2. **Improvements** - should fix, better aligns with guidelines
-3. **Nitpicks** - optional, minor style preferences
-4. **Praise** - what's done well (briefly)
-
-## Output Format
-
-For each issue:
-```
-### [Critical/Improvement/Nitpick]: Brief title
-
-**Location**: `path/to/file.swift:42`
-**Guideline**: [Quote relevant guideline]
-**Issue**: [What's wrong]
-**Suggestion**: [How to fix]
-```
-
-## Critical Rules
-
-- **DO NOT make changes** - this is review only
-- **Cite specific guidelines** - not just "this is bad"
-- **Be actionable** - every issue should have a clear fix
-- **Include file:line** - make issues easy to find
+State the reviewed scope and material verification gaps. If there are no actionable findings,
+say so; do not add praise or nitpicks merely to fill a report.

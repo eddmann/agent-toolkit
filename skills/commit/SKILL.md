@@ -1,35 +1,42 @@
 ---
 name: commit
-description: "Create git commits using Conventional Commits format"
+description: "Use when committing task changes using Conventional Commits."
 ---
 
-Create a git commit for the current changes using a concise Conventional Commits-style subject.
+# Commit
 
-## Format
+Commit task-owned changes using `<type>(<scope>): <summary>`:
 
-`<type>(<scope>): <summary>`
+- Use `feat`, `fix`, `docs`, `refactor`, `chore`, `test` or `perf` as appropriate.
+- Scope is optional: a short noun such as `api` or `ui`.
+- Write an imperative summary without a trailing period. Keep the entire subject, including
+  type and scope, at most 72 characters.
+- Add an optional body in short paragraphs after a blank line. No breaking-change markers,
+  footers or sign-offs.
 
-- `type` REQUIRED. Use `feat` for new features, `fix` for bug fixes. Other common types: `docs`, `refactor`, `chore`, `test`, `perf`.
-- `scope` OPTIONAL. Short noun in parentheses for the affected area (e.g., `api`, `parser`, `ui`).
-- `summary` REQUIRED. Short, imperative, <= 72 chars, no trailing period.
+Describe the final result of the committed diff and why it matters. Omit intermediate edits,
+abandoned approaches and fixes to mistakes introduced during the task. Write the subject and
+body for someone who has not seen the conversation.
 
-## Notes
+Commit by default; push only when requested. Honor caller instructions and path/glob limits.
+Missing filenames do not expand scope to every checkout change. Resolve ownership from the
+current task and diff; ask only if ambiguity remains.
 
-- Body is OPTIONAL. If needed, add a blank line after the subject and write short paragraphs.
-- Do NOT include breaking-change markers or footers.
-- Do NOT add sign-offs (no `Signed-off-by`).
-- Only commit; do NOT push.
-- If it is unclear whether a file should be included, ask the user which files to commit.
-- Treat any caller-provided arguments as additional commit guidance. Common patterns:
-  - Freeform instructions should influence scope, summary, and body.
-  - File paths or globs should limit which files to commit. If files are specified, only stage/commit those unless the user explicitly asks otherwise.
-  - If arguments combine files and instructions, honor both.
+## Isolate And Verify
 
-## Steps
-
-1. Infer from the prompt if the user provided specific file paths/globs and/or additional instructions.
-2. Review `git status` and `git diff` to understand the current changes (limit to argument-specified files if provided).
-3. (Optional) Run `git log -n 50 --pretty=format:%s` to see commonly used scopes.
-4. If there are ambiguous extra files, ask the user for clarification before committing.
-5. Stage only the intended files (all changes if no files specified).
-6. Run `git commit -m "<subject>"` (and `-m "<body>"` if needed).
+1. Read `git status --short`, `git diff` and `git diff --cached`, including the entire index.
+   Select intended files or hunks; a requested path does not establish ownership of every hunk.
+2. Prepare and inspect the exact proposed commit:
+   - **Only intended changes in the index:** stage selected files/hunks, inspect
+     `git diff --cached`, then commit normally.
+   - **Whole intended files with unrelated files staged:** use `git commit --only -- <paths>`.
+     Review those files against `HEAD` first: this commits their working-tree contents,
+     including unstaged hunks.
+   - **Partial files with unrelated staged work:** use a temporary index based on `HEAD`,
+     apply only the intended patch and inspect its cached diff. Commit through that index,
+     then reconcile only committed hunks in the normal index. Preserve excluded staged and
+     unstaged hunks; do not substitute `--only`, blanket unstaging or `git add .`.
+3. Commit with `-m "<subject>"` and optional `-m "<body>"`. If a hook fails, inspect the
+   failure; do not bypass hooks or expand the commit's scope to unrelated fixes. Verify the
+   resulting commit and `git status --short`, confirming unrelated edits and staging remain
+   intact. Never run a normal commit against an index containing unrelated changes.

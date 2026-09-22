@@ -1,98 +1,41 @@
-# Running Scripts with uv
+# Running Scripts
 
-## Basic Usage
+Use `uv run script.py [args]` for project scripts. Use `uv run --no-project script.py` for
+independent work that should not load the surrounding project. For one-off dependencies,
+use `--with`, for example `uv run --no-project --with httpx tool.py`.
 
-```bash
-uv run script.py                   # Run a script
-uv run script.py arg1 arg2         # With arguments
-uv run --python 3.10 script.py     # Specific Python version
-echo 'print("hi")' | uv run -      # From stdin
-```
+## Reusable Standalone Scripts
 
-In a project directory, use `--no-project` to skip installing the project:
-
-```bash
-uv run --no-project script.py
-```
-
-## Ad-hoc Dependencies
-
-```bash
-uv run --with requests script.py
-uv run --with 'requests>2,<3' script.py
-uv run --with requests --with rich script.py
-```
-
-## Inline Script Metadata (Recommended)
-
-Declare dependencies directly in the script:
+Initialize a script with `uv init --script tool.py`. Declare its actual Python requirements
+and dependencies using inline metadata:
 
 ```python
 # /// script
 # requires-python = ">=3.12"
-# dependencies = [
-#   "requests<3",
-#   "rich",
-# ]
-# ///
-
-import requests
-from rich import print
-```
-
-Then just: `uv run script.py`
-
-### Managing Dependencies
-
-```bash
-uv init --script example.py --python 3.12   # Create script with metadata
-uv add --script example.py requests rich    # Add dependencies
-```
-
-### Alternative Index
-
-```bash
-uv add --index "https://example.com/simple" --script example.py requests
-```
-
-Adds to metadata:
-
-```python
-# [[tool.uv.index]]
-# url = "https://example.com/simple"
-```
-
-## Locking Dependencies
-
-```bash
-uv lock --script example.py  # Creates example.py.lock
-```
-
-## Reproducibility
-
-Pin resolution date:
-
-```python
-# /// script
-# dependencies = ["requests"]
-# [tool.uv]
-# exclude-newer = "2023-10-16T00:00:00Z"
+# dependencies = ["httpx"]
 # ///
 ```
 
-## Executable Scripts (Shebang)
+The Python version above is an example, not a universal minimum. Scripts with inline metadata
+use their own dependency environment. Add dependencies with `uv add --script tool.py httpx`.
+
+For reproducible resolution, run `uv lock --script tool.py` and retain the resulting
+`tool.py.lock` alongside the script. Avoid unrelated upgrades to an existing lockfile.
+Use an alternative index only when required by the project; keep credentials out of scripts.
+
+## Executable Scripts
+
+For a script without a `.py` suffix, use the script shebang and inline metadata:
 
 ```python
 #!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = ["httpx"]
+# dependencies = []
 # ///
 
-import httpx
-print(httpx.get("https://example.com"))
+print("Hello")
 ```
 
-```bash
-chmod +x myscript
-./myscript
-```
+Make it executable with `chmod +x tool`, then run `./tool`.
+
+See the [uv script guide](https://docs.astral.sh/uv/guides/scripts/) for version-specific options.
