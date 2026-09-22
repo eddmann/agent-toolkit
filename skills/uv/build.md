@@ -1,65 +1,31 @@
-# uv Build Backend
+# Python Packaging
 
-Use `uv_build` for pure Python packages. For extension modules, use `hatchling` instead.
+Keep an existing package's build backend unless changing it is part of the request. `uv build`
+can invoke the configured backend; adopting uv for commands does not require adopting `uv_build`.
 
-## pyproject.toml
+## New Packages
 
-```toml
-[project]
-name = "my-package"
-version = "0.1.0"
-requires-python = ">=3.12"
-dependencies = []
+Use `uv init --lib package-name` for a new library, then inspect the generated `pyproject.toml`
+and layout. Select a different backend through the installed version's `--build-backend` option
+when needed; check `uv init --help` for supported values.
 
-[build-system]
-requires = ["uv_build>=0.9.28,<0.10.0"]
-build-backend = "uv_build"
-```
+- `uv_build` suits pure Python packages with a conventional layout.
+- Native extensions need a backend that supports their toolchain, such as maturin for Rust or
+  scikit-build-core for C/C++.
+- Keep the generated compatible backend requirement, including its upper bound where appropriate,
+  rather than copying an old version pin. Respect the package's supported Python versions.
 
-## Project Structure
+## Layout And Contents
 
-Default layout uses `src/<package_name>/__init__.py`:
+For `uv_build`, the default layout is `src/<package_name>/__init__.py`. Custom layouts use
+`tool.uv.build-backend.module-name` and `module-root`; these settings do not apply to other backends.
+Read the selected backend's documentation when changing namespaces or including package data.
+Keep runtime assets in the distribution and exclude unintended local files.
 
-```
-pyproject.toml
-src/
-└── my_package/
-    └── __init__.py
-```
+Build with `uv build` and inspect the resulting wheel and source distribution when packaging
+changes. Verify imports and required assets from an installed wheel in an isolated environment;
+a source-checkout import alone does not establish that the package contains everything needed.
+Building does not publish the package.
 
-Package name is normalized: `Foo-Bar` → `foo_bar`.
-
-### Custom Module Location
-
-```toml
-[tool.uv.build-backend]
-module-name = "mymodule"
-module-root = ""  # Use project root instead of src/
-```
-
-### Namespace Packages
-
-For `foo.bar` namespace:
-
-```
-src/foo/bar/__init__.py  # No __init__.py in foo/
-```
-
-```toml
-[tool.uv.build-backend]
-module-name = "foo.bar"
-```
-
-## File Inclusion/Exclusion
-
-Excludes `__pycache__`, `*.pyc`, `*.pyo` by default.
-
-```toml
-[tool.uv.build-backend]
-source-include = ["assets/**"]
-source-exclude = ["/dist", "tests/**"]
-```
-
-- Includes are anchored (`pyproject.toml` = only root)
-- Excludes are not anchored (`__pycache__` = all dirs named that)
-- Use `/prefix` to anchor excludes
+Sources: [build backends](https://docs.astral.sh/uv/concepts/build-backend/) and
+[creating projects](https://docs.astral.sh/uv/concepts/projects/init/).

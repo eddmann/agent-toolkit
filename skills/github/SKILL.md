@@ -1,48 +1,40 @@
 ---
 name: github
-description: "Interact with GitHub using the `gh` CLI. Use `gh issue`, `gh pr`, `gh run`, and `gh api` for issues, PRs, CI runs, and advanced queries."
+description: "Use when interacting with GitHub repositories, issues, pull requests or Actions through the gh CLI."
 user-invocable: false
 ---
 
-# GitHub Skill
+# GitHub
 
-Use the `gh` CLI to interact with GitHub. Always specify `--repo owner/repo` when not in a git directory, or use URLs directly.
+Use `gh` for GitHub operations. Resolve the repository from the request or checkout; pass
+`--repo <owner/repo>` or a resource URL when the destination could be ambiguous. For `gh api`,
+use the resolved repository in the endpoint path.
 
-## Pull Requests
+## Read And Verify
 
-Check CI status on a PR:
-```bash
-gh pr checks 55 --repo owner/repo
+Prefer `--json` with selected fields and `--jq` for focused output. Check result limits;
+paginate or narrow the query before concluding that an issue, PR or run does not exist.
+Use `gh api --paginate` for paginated REST listings; GraphQL requires cursor pagination.
+
+```sh
+gh pr view <pr> --repo <owner/repo> --json url,title,body,baseRefName,headRefOid,state
+gh pr checks <pr> --repo <owner/repo>
+gh run list --repo <owner/repo> --commit <sha> --json databaseId,headSha,status,conclusion,url
+gh run view <run-id> --repo <owner/repo> --json headSha,status,conclusion,jobs,url
+gh run view <run-id> --repo <owner/repo> --log-failed
+gh issue list --repo <owner/repo> --state all --search "<terms>" --json number,title,state,url
 ```
 
-List recent workflow runs:
-```bash
-gh run list --repo owner/repo --limit 10
-```
+Match CI evidence to the intended workflow, commit, run and attempt. Queued or running checks
+are incomplete; a successful older run does not establish the current revision's status.
+Use command help for unfamiliar flags rather than guessing.
 
-View a run and see which steps failed:
-```bash
-gh run view <run-id> --repo owner/repo
-```
+## Write
 
-View logs for failed steps only:
-```bash
-gh run view <run-id> --repo owner/repo --log-failed
-```
+Make only requested changes. Use `--body-file <path>` for multiline issue, PR and comment bodies,
+keeping real newlines in the file. Re-read the resource after a mutation before reporting success.
+If a request times out ambiguously, inspect remote state before retrying to avoid duplicate writes.
 
-## API for Advanced Queries
-
-The `gh api` command is useful for accessing data not available through other subcommands.
-
-Get PR with specific fields:
-```bash
-gh api repos/owner/repo/pulls/55 --jq '.title, .state, .user.login'
-```
-
-## JSON Output
-
-Most commands support `--json` for structured output.  You can use `--jq` to filter:
-
-```bash
-gh issue list --repo owner/repo --json number,title --jq '.[] | "\(.number): \(.title)"'
-```
+Use [pr](../pr/SKILL.md) for preparing or opening PRs,
+[pr-review](../pr-review/SKILL.md) for reviewing them, and
+[github-issue](../github-issue/SKILL.md) for drafting or creating issues.

@@ -1,45 +1,45 @@
 ---
 name: github-issue
-description: "Create a GitHub issue from context or conversation"
+description: "Use when drafting or creating a GitHub issue from a problem, feature request or conversation."
 argument-hint: <issue description>
 ---
 
-Create a GitHub issue based on provided context or the current conversation.
+# GitHub Issue
 
-## Title Format
+Turn the requested problem or feature into an actionable issue. Draft when asked to draft;
+create when asked to create, honoring existing authorization without another approval step.
 
-`<type>(<scope>): <summary>`
+## Prepare
 
-- `type` REQUIRED: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `chore`
-- `scope` OPTIONAL: affected area (e.g., `api`, `auth`, `ui`)
-- `summary` REQUIRED: concise description, under 80 chars total
+1. Resolve the repository from the request or checkout and read its issue templates and relevant
+   instructions. Use conversation context to fill known details; ask only for missing decisions
+   that materially affect the issue.
+2. Search open and closed issues for likely duplicates using relevant terms. Inspect promising
+   matches and their resolution before treating them as duplicates. If an active issue already
+   covers the request, return its link; do not silently create a duplicate or update it instead.
+3. Verify supporting code, logs or reproduction steps where available. Label unverified user
+   reports as such; do not invent evidence or expand the request into speculative implementation.
 
-## Body
+## Write
 
-Include relevant sections only:
+Use `<type>(<scope>): <summary>` for the title, under 80 characters total. Choose `feat`, `fix`,
+`docs`, `refactor`, `perf`, `test` or `chore`; scope is optional.
 
-- **Summary** - brief overview
-- **Description** - detailed explanation
-- **Steps to reproduce** - if it's a bug
-- **Expected behavior** - what should happen
-- **Code snippets / error messages** - if applicable
+Follow the repository template. Otherwise include only useful sections:
 
-## Steps
+- **Problem:** the current behavior or unmet need and who it affects.
+- **Evidence:** relevant code, logs or user reports; reproduction and expected behavior for bugs.
+- **Impact:** the practical consequence.
+- **Acceptance criteria:** observable outcomes that demonstrate completion.
 
-1. If no context is provided, extract it from the current conversation (bugs, features, errors discussed).
-2. Draft a title and body. Present to the user for approval.
-3. Iterate if the user requests changes.
-4. ONLY after approval, create with `gh issue create`:
-   ```bash
-   gh issue create --title "type(scope): summary" --body "$(cat <<'EOF'
-   Body content here...
-   EOF
-   )"
-   ```
-5. Report the issue URL.
+Write for someone without conversation context. Omit discussion chronology, abandoned ideas,
+unsupported claims and sensitive data. Link related issues when they clarify scope.
 
-## Notes
+## Deliver
 
-- Do NOT create the issue until the user explicitly approves.
-- Use the current working directory's git repository.
-- Format code and errors properly in markdown.
+For a draft, return the proposed title and body. For creation, save the exact body to a temporary
+Markdown file with real newlines, then use
+`gh issue create --repo <owner/repo> --title "<title>" --body-file <body-path>`.
+Verify the resulting issue's repository, title and body, and return its URL. If creation times
+out or has an ambiguous result, check whether the issue exists before retrying. Add labels,
+assignees or project placement only when requested or required by repository instructions.

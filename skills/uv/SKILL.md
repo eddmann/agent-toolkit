@@ -1,37 +1,26 @@
 ---
 name: uv
-description: "Use `uv` instead of pip/python/venv. Run scripts with `uv run script.py`, add deps with `uv add`, use inline script metadata for standalone scripts."
+description: "Use when running Python scripts, managing dependencies or configuring Python packaging."
 user-invocable: false
 ---
 
-## Quick Reference
+# uv
+
+Prefer `uv` for Python execution and dependencies. Read the project's Python requirements,
+package configuration and repository instructions first. Preserve existing tooling, lockfiles
+and build backends; ordinary Python work does not require a tooling migration.
 
 ```bash
-uv run script.py                   # Run a script
-uv run --with requests script.py   # Run with ad-hoc dependency
-uv add requests                    # Add dependency to project
-uv init --script foo.py            # Create script with inline metadata
+uv run script.py                        # Run within the project environment
+uv run --no-project --with httpx tool.py # Run an independent script with an ad-hoc dependency
+uv add httpx                            # Add a dependency to a uv-managed project
+uv init --script tool.py                 # Initialize a standalone script
 ```
 
-## Inline Script Dependencies
+For reusable standalone scripts, declare dependencies with inline script metadata instead of
+modifying an unrelated project's dependencies. Match the required Python version to the code
+and target environment. Read [scripts.md](scripts.md) for metadata, locking and executable scripts.
 
-```python
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["requests"]
-# ///
-```
-
-See [scripts.md](scripts.md) for full details on running scripts, locking, and reproducibility.
-
-## Build Backend
-
-Use `uv_build` for pure Python packages:
-
-```toml
-[build-system]
-requires = ["uv_build>=0.9.28,<0.10.0"]
-build-backend = "uv_build"
-```
-
-See [build.md](build.md) for project structure, namespaces, and file inclusion.
+Read [build.md](build.md) when creating or changing a distributable package. Keep backend
+selection specific to the package's needs. Check `uv --version` and command help when flags
+or generated defaults matter; do not copy a fixed backend version from an old example.

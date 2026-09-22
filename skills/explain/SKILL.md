@@ -1,54 +1,23 @@
 ---
 name: explain
-description: "Explain how code works — architecture, patterns, and design decisions (read-only)"
+description: "Use when explaining how code works, including architecture, execution flow and design decisions."
 argument-hint: <area or concept>
 ---
 
-ultrathink: Provide a thorough explanation by first exploring extensively, then synthesizing a clear answer.
+# Explain
 
-## Your Task
+Explain the requested code or concept at the user's level of detail. Keep the task read-only.
 
-Explain: $ARGUMENTS
+1. Read repository instructions, the relevant implementation and tests. Trace the connections
+   needed to understand the behavior; consult documentation or history when the question depends
+   on design rationale.
+2. Start with the purpose and main components, then follow a concrete input through the code
+   to its outcome. Explain responsibilities, state changes and important failure paths where
+   they matter to the requested topic.
+3. Support key points with file/line references. Distinguish documented decisions from inferred
+   reasons, and state gaps rather than inventing an author's intent.
+4. Use a small example or diagram when it makes the flow easier to understand. Explain relevant
+   tradeoffs in plain language; name patterns only when the name helps.
 
-## Context
-
-- Current directory: !`pwd`
-- Git branch: !`git branch --show-current 2>/dev/null || echo "not a git repo"`
-## Instructions
-
-### Phase 1: Explore Extensively
-
-Before explaining anything:
-
-1. **Use Explore agents** to find all relevant code
-2. **Read the actual files** - don't guess from names
-3. **Trace the flow** - how do components connect?
-4. **Check tests** for behavioral documentation
-5. **Look at git history** for evolution and decisions
-
-### Phase 2: Synthesize Understanding
-
-Think deeply about:
-
-1. **What is the architecture?** - components, layers, boundaries
-2. **What patterns are used?** - and why were they chosen?
-3. **How does data flow?** - inputs to outputs
-4. **What are the key abstractions?** - and what do they hide?
-5. **What tradeoffs were made?** - and what are the implications?
-
-### Phase 3: Explain Clearly
-
-Provide an explanation that:
-
-1. **Starts with the big picture** - high-level architecture first
-2. **Zooms into specifics** - key files and functions
-3. **Explains the "why"** - not just "what" the code does
-4. **Uses file:line references** - so the user can navigate
-5. **Connects to patterns** - name the design patterns where applicable
-
-## Critical Rules
-
-- **DO NOT make changes** - this is explanation only
-- **DO NOT skip exploration** - read before explaining
-- **DO include concrete references** - file paths and line numbers
-- **DO explain rationale** - why things are structured this way
+Focus on how the existing code works. Do not turn the explanation into an unsolicited review
+or redesign, and stop once the requested concept is clear.
