@@ -2,10 +2,6 @@
 name: review
 description: "Use when reviewing local code against repository conventions and coding guidelines."
 argument-hint: <file, directory, or area>
-config:
-  GUIDELINES_DIR:
-    description: "Path to the agent-guidelines directory"
-    default: "/Users/edd/Projects/agent-guidelines"
 ---
 
 # Review
@@ -15,17 +11,9 @@ Keep the review read-only unless fixes are also requested. Preserve unrelated wo
 
 ## Guidelines
 
-Read repository instructions and the relevant standards under `GUIDELINES_DIR`, defaulting to
-`/Users/edd/Projects/agent-guidelines` when unset:
-
-- `foundation/code-philosophy.md`
-- `practices/clean-code-practices.md`
-- `practices/design-principles.md`
-- `practices/testing.md`
-- `practices/error-handling.md`
-
-Repository-specific requirements take precedence over general preferences. If a guideline file
-is unavailable, state the gap and continue with available repository guidance and code evidence.
+Read repository instructions and the [shared guidelines](references/guidelines.md) for
+correctness, simplicity, design, testing and error handling. Repository-specific requirements
+take precedence over general preferences.
 
 ## Review And Report
 

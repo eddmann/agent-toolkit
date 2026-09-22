@@ -31,14 +31,34 @@ read-only; opening a requested PR includes committing and pushing its intended c
 ## Write The Description
 
 Use a short, outcome-focused title in plain language and follow the repository's PR template
-when present. A small PR usually needs a problem/outcome paragraph and validation. Add detail
-only when useful for implementation, migrations, risks, tradeoffs or review focus.
+when present. Otherwise use the template below, keeping each section proportionate to the
+change. Omit Screenshots when there is no relevant visual evidence and Notes when unnecessary.
 
 Describe the final behavior and implementation for a reviewer without conversation context.
 Use the final diff as the source of truth; omit intermediate edits, abandoned approaches,
 fixes to mistakes introduced during the task and file-by-file narration. When scope changes,
 rewrite the title and body around the final result. Include relevant UI screenshots when
 available; do not invent evidence.
+
+```md
+## Summary
+Describe the delivered outcome in one or two sentences.
+
+## Problem
+Explain the bug, gap or workflow limitation being solved.
+
+## Implementation
+Describe the final solution and decisions that help the reviewer assess it.
+
+## Screenshots
+Include relevant screenshots or recordings of UI changes.
+
+## Validation
+List checks actually run, their results and material verification gaps.
+
+## Notes
+Mention relevant tradeoffs, migration concerns, follow-ups or review focus areas.
+```
 
 ## Open Or Update
 

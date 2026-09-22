@@ -9,6 +9,9 @@ Assess whether the PR solves its intended problem correctly with the simplest su
 change. Flag unnecessary abstractions, speculative features and redundant tests only when
 their concrete cost is clear. Do not impose personal style or invent findings.
 
+Read the [shared guidelines](../review/references/guidelines.md) for correctness, simplicity,
+design, testing and error handling. Repository-specific requirements take precedence.
+
 ## Review
 
 1. Read repository instructions, the PR description, linked issues, discussion, diff and checks.
