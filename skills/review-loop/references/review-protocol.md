@@ -35,6 +35,8 @@ Targets:
   Prepare an isolated worktree when necessary.
 - A PR: the host reads the PR context and prepares its head/base, then uses `--base REF`.
 
+A new worktree excludes uncommitted edits; choose the checkout containing the intended changes.
+
 The brief narrows the intended task scope. Snapshots conservatively cover the whole
 superproject's Git-visible state, including unrelated edits, so unrelated changes can
 invalidate a review but never authorize fixes. Ignored files, external dependencies and

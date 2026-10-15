@@ -17,22 +17,12 @@ A collection of skills, extensions, and prompts that I use across different AI c
 Reusable agent skills — self-contained prompt-based capabilities that can be plugged into compatible coding agents (e.g. Claude Code). Each skill lives in its own directory with a `SKILL.md` defining its behaviour.
 
 **[review-loop](skills/review-loop/SKILL.md)** gets an independent review from Claude Code
-while working in Codex, or from Codex while working in Claude Code. It reuses the toolkit's
-shared review guidelines, supports assessment-only and authorized review-fix-review work,
-and stops after three external review attempts by default. The host coordinates fixes and
-tests; a Python runner handles read-only CLI calls, structured findings, round history and
-checks that the reviewed code has not changed.
-
-For example, ask: `Review-loop our changes with Claude Opus at high effort. Fix confirmed
-issues and repeat up to three rounds.` Or use `reviewer=codex model=<model-id> effort=high
-rounds=3` with a branch/PR target and `report findings only`. Per-run options override saved
-review preferences, then the external CLI's defaults; they do not change the host's model.
-
-Requires Python 3.10+, Git, and the selected reviewer CLI installed and authenticated where
-the skill runs. You can stay in your desktop app or IDE; the second GUI is not used.
-Both installers above discover the new skill automatically. See the
-[protocol](skills/review-loop/references/review-protocol.md) for saved preferences, runner
-commands, boundaries and tests.
+while working in Codex, or vice versa, using the shared review guidelines. Ask:
+`Review-loop our changes with Claude Opus at high effort. Fix confirmed issues, up to three
+rounds.` For assessment only, say `report findings only`. Model, effort and round limits are
+configurable. Requires Python 3.10+, Git and an authenticated reviewer CLI on the executing
+machine; you can stay in your GUI. Both installers discover the skill automatically.
+See the [protocol](skills/review-loop/references/review-protocol.md) for setup and commands.
 
 ### `third-party-skills/`
 
