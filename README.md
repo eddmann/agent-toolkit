@@ -16,6 +16,14 @@ A collection of skills, extensions, and prompts that I use across different AI c
 
 Reusable agent skills — self-contained prompt-based capabilities that can be plugged into compatible coding agents (e.g. Claude Code). Each skill lives in its own directory with a `SKILL.md` defining its behaviour.
 
+**[review-loop](skills/review-loop/SKILL.md)** gets an independent review from Claude Code
+while working in Codex, or vice versa, using the shared review guidelines. Ask:
+`Review-loop our changes with Claude Opus at high effort. Fix confirmed issues, up to three
+rounds.` For assessment only, say `report findings only`. Model, effort and round limits are
+configurable. Requires Python 3.10+, Git and an authenticated reviewer CLI on the executing
+machine; you can stay in your GUI. Both installers discover the skill automatically.
+See the [protocol](skills/review-loop/references/review-protocol.md) for setup and commands.
+
 ### `third-party-skills/`
 
 Third-party skills managed via `manifest.json`. Each skill is pinned to a specific commit for reproducibility. The `installed/` directory is gitignored — only the manifest is tracked.
